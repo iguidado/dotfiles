@@ -1,5 +1,6 @@
 #!/bin/sh
 
+
 detect_os() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
@@ -7,6 +8,19 @@ detect_os() {
     else
         echo "unknown"
     fi
+}
+
+prepare_os() {
+    os=$(detect_os)
+    case "$os" in
+        ubuntu|debian)
+            sudo apt-get update -qq
+            ;;
+        *)
+            echo "OS non supporté : $os"
+            exit 1
+            ;;
+    esac
 }
 
 # Install python
@@ -18,7 +32,6 @@ install_python_and_pip() {
     os=$(detect_os)
     case "$os" in
         ubuntu|debian)
-            sudo apt-get update -qq
             sudo apt-get install -y python3 python3-pip
             ;;
         *)
@@ -48,7 +61,7 @@ install_ansible() {
         echo "Installing Ansible..."
             case "$os" in
                 ubuntu|debian)
-                    sudo apt update && sudo apt install ansible -y
+                    sudo apt install ansible -y
                     ;;
                 *)
                     echo "Unsupported OS: $os"
@@ -61,14 +74,74 @@ install_ansible() {
 
 
 install_docker() {
+    # Start by removin any old versions of Docker that might be installed
+    sudo apt remove docker.io docker-compose docker-doc podman-docker containerd runc
     return
 # Install Docker
 
 }
 
+install_git() {
+    if command -v git >/dev/null 2>&1; then
+        echo "Git is already installed."
+    else
+        os=$(detect_os)
+        case "$os" in
+            ubuntu|debian)
+                sudo apt install git -y
+                ;;
+            *)
+                echo "Unsupported OS: $os"
+                exit 1
+                ;;
+        esac
+    fi
+}
+
+install_sudo() {
+    if command -v sudo >/dev/null 2>&1; then
+        echo "sudo is already installed."
+    else
+        os=$(detect_os)
+        case "$os" in
+            ubuntu|debian)
+                su -c "apt install sudo -y"
+                ;;
+            *)
+                echo "Unsupported OS: $os"
+                exit 1
+                ;;
+        esac
+    fi
+    if ! groups "$USER" | grep -q "\bsudo\b"; then
+        echo "Adding $USER to sudo group..."
+        su -c "usermod -aG sudo \"$USER\""
+        echo "Please log out and log back in for the changes to take effect."
+        echo "You can also log again with 'su - $USER' to apply the new group membership immediately."  
+        echo "You can then re-run this script to continue the installation process after logging back in."
+        exit 0
+    fi
+}
+
+run_playbook() {
+    ansible-playbook -i "localhost," -c local $HOME/dotfiles/playbook.yml "$@"
+}
+
+clone_dotfiles() {
+    if [ -d "$HOME/dotfiles" ]; then
+        echo "Dotfiles repository already exists."
+    else
+        git clone https://github.com/iguidado/dotfiles.git $HOME/dotfiles
+    fi
+}
+
+
 main() {
+    prepare_os
+    install_sudo
     install_ansible
-    #clone_dotfiles
+    install_git
+    clone_dotfiles
     #run_playbook "$@"
 }
 
