@@ -106,6 +106,7 @@ install_docker() {
 
 }
 
+
 install_git() {
     if command -v git >/dev/null 2>&1; then
         echo "Git is already installed."

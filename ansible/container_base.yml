@@ -1,0 +1,68 @@
+- name: create requirement for containerization at user_level
+  hosts: all
+  become: true
+
+
+  vars:
+  debian_packages:
+    - apt-transport-https
+    - ca-certificates
+    - curl
+    - gnupg
+    - lsb-release
+  
+
+  tasks:
+
+    - name: remove unecessary / conflictic software
+      ansible.builtin.apt:
+        pkg:
+          - docker.io
+          - docker-compose
+          - docker-doc
+          - podman-docker
+          - containerd
+          - runc
+        state: absent
+
+    - name: Installation des dépendances (Ubuntu/Debian)
+      ansible.builtin.apt:
+        name: "{{ debian_packages }}"
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+		
+    - name: Ajout du dépôt Docker
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/{{ ansible_distribution | lower }} {{ ansible_distribution_release }} stable"
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Installation de Docker Engine (Ubuntu/Debian)
+      apt:
+        name: 
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    # -------- Alpine configuration -----------
+    - name: Ajout de la clé GPG officielle Docker
+      apt_key:
+        url: https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg
+        state: present
+      when: ansible_os_family == "Debian"
+		
+
+    - name: Installation de Docker (Alpine)
+      apk:
+        name: 
+          - docker
+          - docker-cli-compose
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Alpine"
