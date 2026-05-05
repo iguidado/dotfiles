@@ -46,28 +46,31 @@ prepare_os() {
     esac
 }
 
-install_sudo() {
-    if command -v sudo >/dev/null 2>&1; then
-        echo "sudo is already installed."
-    else
-        os=$(detect_os)
-        case "$os" in
-            ubuntu|debian)
-                su -c "apt install sudo -y"
-                ;;
-            *)
-                echo "Unsupported OS: $os"
-                exit 1
-                ;;
-        esac
-    fi
+add_user_sudo() {
     if ! groups "$USER" | grep -q "\bsudo\b"; then
-        echo "Adding $USER to sudo group..."
-        su -c "usermod -aG sudo \"$USER\""
+        echo "Adding $USER to sudo group... (Please enter your root password)"
+        su -c "usermod -aG sudo \"$USER\"" < /dev/tty
         echo "Please log out and log back in for the changes to take effect."
         echo "You can also log again with 'su - $USER' to apply the new group membership immediately."  
         echo "You can then re-run this script to continue the installation process after logging back in."
         exit 0
+    fi
+}
+
+prepare_privilege() {
+    # Checking if user have sudo capabilities
+    echo "Trying to confirm that you have sudo capabilities available. Please enter your sudo password if asked"
+    if sudo -n true > /dev/null 2>&1; then
+        echo "Sudo capabilities are already available"
+        return 0
+    fi
+
+    if command -v sudo >/dev/null 2>&1; then
+        echo "sudo is already installed. but capabilities are lacking"
+        add_user_sudo
+    else
+        pkg_install "sudo"
+        add_user_sudo
     fi
 }
 
