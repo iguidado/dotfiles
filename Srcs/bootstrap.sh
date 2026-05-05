@@ -1,5 +1,7 @@
 #!/bin/sh
 
+set -x
+
 check_root() {
     if [ "$(id -u)" -eq 0 ]; then
         echo "❌ Erreur : Ce script ne doit pas être exécuté en tant que root."
