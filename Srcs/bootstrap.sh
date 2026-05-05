@@ -165,7 +165,7 @@ run_playbook() {
 
 main() {
     check_root
-    install_sudo
+    prepare_privilege
     prepare_os
     install_ansible
     install_git
