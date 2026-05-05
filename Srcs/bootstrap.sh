@@ -1,5 +1,12 @@
 #!/bin/sh
 
+check_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        echo "❌ Erreur : Ce script ne doit pas être exécuté en tant que root."
+        echo "Il est conçu pour configurer l'environnement d'un utilisateur standard."
+        exit 1
+    fi
+}
 
 detect_os() {
     if [ -f /etc/os-release ]; then
@@ -10,11 +17,25 @@ detect_os() {
     fi
 }
 
+pkg_install() {
+    os=$(detect_os)
+     case "$os" in
+        ubuntu|debian) sudo apt-get install -y "$1" ;;
+        alpine) sudo apk add "$1" ;;
+        *) echo "OS non supporté : $os"
+           exit 1
+           ;;
+     esac
+}
+
 prepare_os() {
     os=$(detect_os)
     case "$os" in
         ubuntu|debian)
             sudo apt-get update -qq
+            ;;
+        alpine)
+            sudo apk update
             ;;
         *)
             echo "OS non supporté : $os"
@@ -138,8 +159,9 @@ run_playbook() {
 
 
 main() {
-    prepare_os
+    check_root
     install_sudo
+    prepare_os
     install_ansible
     install_git
     clone_dotfiles
