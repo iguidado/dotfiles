@@ -1,0 +1,19 @@
+# Secrets et clés — ne jamais stower
+.*\.key
+.*\.pem
+.*\.token
+.*_rsa$
+.*_ed25519$
+\.env$
+\.envrc$
+
+# Fichiers temporaires
+.*\.swp
+.*\.swo
+.*~
+.*\.bak
+\.DS_Store
+
+# VCS (complémentaire à la liste par défaut)
+\.gitignore
+\.gitmodules

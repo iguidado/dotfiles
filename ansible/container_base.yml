@@ -67,3 +67,5 @@
         state: present
         update_cache: yes
       when: ansible_os_family == "Alpine"
+
+      #    - name: Add user to docker group

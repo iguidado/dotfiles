@@ -1,0 +1,17 @@
+- name: install dotfiles with staw
+  hosts: all
+  tasks:
+    - name: install stow
+      ansible.builtin.apt:
+        name: stow
+        state: present
+
+
+    - name: apply stow
+      ansible.builtin.command: stow --no-folding --dir  ~/dotfile/Srcs
+      register: result
+
+
+    - name: check result
+        debug:
+          var: result
