@@ -159,7 +159,7 @@ clone_dotfiles() {
 }
 
 run_playbook() {
-    ansible-playbook -i "localhost," -c local $HOME/dotfiles/Srcs/ansible/container_base.yml "$@"
+    ansible-playbook -i "localhost," -c local $HOME/dotfiles/ansible/container_base.yml "$@"
     #ansible-playbook -i "localhost," -c local $HOME/dotfiles/playbook.yml "$@"
 }
 
