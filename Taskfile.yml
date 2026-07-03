@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+vars:
+  VAGRANT_DIR: "./Test"
+
+tasks:
+
+  default:
+    desc: "Print command list"
+    cmds:
+      - task --list
+
+  test-init:
+    desc: "Init repository"
+    cmds:
+      - echo "Nothing to install for now"
+
+  test-up:
+    desc: "Deploy test infra"
+    dir: "{{.VAGRANT_DIR}}"
+    preconditions:
+      - sh: command -v vagrant
+        msg: "Vagrant n'est pas installé"
+      - sh: test -f Vagrantfile
+        msg: "Aucun Vagrantfile trouvé dans {{.VAGRANT_DIR}}"
+    cmds:
+      - vagrant up --no-provision --provider=libvirt
+
+  test-provision:
+    desc: "Provision test environment"
+    dir: "{{.VAGRANT_DIR}}"
+    deps: [test-up]
+    cmds:
+      - vagrant provision
+
+  test-clean:
+    desc: "Clean environment"
+    dir: "{{.VAGRANT_DIR}}"
+    cmds:
+      - vagrant destroy -f

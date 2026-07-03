@@ -104,3 +104,4 @@ source $ZSH/oh-my-zsh.sh
 # alias ohmyzsh="mate ~/.oh-my-zsh"
 alias obsidian="flatpak run md.obsidian.Obsidian"
 export VAGRANT_DEFAULT_PROVIDER=libvirt
+export WORKSPACE=~/PEOS/Workspace
