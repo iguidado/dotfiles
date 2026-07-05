@@ -8,7 +8,7 @@
 
 
     - name: Simulate Stow Execution
-      ansible.builtin.shell: "stow --no-folding --simulate --verbose=2 *"
+      ansible.builtin.shell: "stow --no-folding --simulate --verbose=2 * -t ~"
       args:
         chdir: "{{ ansible_user_dir }}/dotfiles/Srcs"
       register: stow_simulation
@@ -16,11 +16,12 @@
       changed_when: false 
 
     - name: Appliquer Stow (uniquement si des changements ont été détectés)
-      ansible.builtin.shell: "stow --no-folding *"
+      ansible.builtin.shell: "stow --no-folding * -t ~"
       args:
         chdir: "{{ ansible_user_dir }}/dotfiles/Srcs"
       # This task is only executed when simulation return contain the word 'LINK'
       when: "'LINK' in stow_simulation.stderr or 'LINK' in stow_simulation.stdout"
+      register: result
 
     - name: check result
       ansible.builtin.debug:

@@ -44,4 +44,4 @@ tasks:
   install:
     desc: "Install dotfiles on current system"
     cmds:
-      - ansible-playbook ./ansible/dotfiles.yml
+      - ansible-playbook ./ansible/dotfiles.yml -i ./ansible/inventory.ini
