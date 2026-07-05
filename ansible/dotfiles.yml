@@ -1,4 +1,4 @@
-- name: install dotfiles with staw
+- name: install dotfiles with Stow
   hosts: all
   tasks:
     - name: install stow
@@ -7,11 +7,21 @@
         state: present
 
 
-    - name: apply stow
-      ansible.builtin.command: stow --no-folding --dir  ~/dotfile/Srcs
-      register: result
+    - name: Simulate Stow Execution
+      ansible.builtin.shell: "stow --no-folding --simulate --verbose=2 *"
+      args:
+        chdir: "{{ ansible_user_dir }}/dotfiles/Srcs"
+      register: stow_simulation
+      # Disable tracking of change, this command is never considered as impacting system
+      changed_when: false 
 
+    - name: Appliquer Stow (uniquement si des changements ont été détectés)
+      ansible.builtin.shell: "stow --no-folding *"
+      args:
+        chdir: "{{ ansible_user_dir }}/dotfiles/Srcs"
+      # This task is only executed when simulation return contain the word 'LINK'
+      when: "'LINK' in stow_simulation.stderr or 'LINK' in stow_simulation.stdout"
 
     - name: check result
-        debug:
-          var: result
+      ansible.builtin.debug:
+        var: result

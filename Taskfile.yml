@@ -40,3 +40,8 @@ tasks:
     dir: "{{.VAGRANT_DIR}}"
     cmds:
       - vagrant destroy -f
+
+  install:
+    desc: "Install dotfiles on current system"
+    cmds:
+      - ansible-playbook ./ansible/dotfiles.yml
