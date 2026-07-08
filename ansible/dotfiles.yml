@@ -5,6 +5,7 @@
       ansible.builtin.apt:
         name: stow
         state: present
+      become: true
 
 
     - name: Simulate Stow Execution

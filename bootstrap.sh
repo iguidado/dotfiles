@@ -124,14 +124,6 @@ install_ansible() {
 }
 
 
-install_docker() {
-    # Start by removin any old versions of Docker that might be installed
-    sudo apt remove docker.io docker-compose docker-doc podman-docker containerd runc
-    return
-# Install Docker
-
-}
-
 
 install_git() {
     if command -v git >/dev/null 2>&1; then
