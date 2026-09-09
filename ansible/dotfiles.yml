@@ -263,22 +263,63 @@
       failed_when: false
       check_mode: false
 
+    # Constat vérifié sur Alpine : une AppImage TÉLÉCHARGÉE mais inexécutable
+    # fait passer la capacité pour PRÉSENTE -- `~/.local/bin/nvim` existe et
+    # arrive en tête du PATH. Le moteur ne tente donc jamais le repli
+    # `package`, et l'utilisateur se retrouve avec un binaire mort qui masque
+    # en plus tout paquet système installé plus tard. Diagnostiquer ne suffit
+    # pas : on retire l'artefact et on laisse le repli jouer.
+    - name: Recenser les AppImages définitivement inutilisables
+      ansible.builtin.set_fact:
+        dotfiles_appimage_dead: >-
+          {{ dotfiles_appimage_resmoke.results | default([])
+             | selectattr('rc', 'defined') | rejectattr('rc', 'equalto', 0)
+             | map(attribute='item') | list }}
+
     - name: Avertir des AppImages qui ne démarrent toujours pas
       ansible.builtin.debug:
         msg: >-
-          {{ item.item.name }} est installé et le déballage automatique
+          {{ item.name }} est installé et le déballage automatique
           (--appimage-extract, le repli quand FUSE manque) n'a pas suffi :
           la commande ne démarre toujours pas. Il reste deux causes, et
           l'extraction n'y changera rien -- libc incompatible (l'AppImage est
           liée à la glibc, elle ne peut pas tourner sur une musl comme Alpine)
-          ou architecture différente. À faire : supprime {{ item.item.dest }},
-          sinon il masquera dans ton PATH le paquet système que le playbook
-          peut installer à sa place.
-      loop: >-
-        {{ dotfiles_appimage_resmoke.results | default([])
-           | selectattr('rc', 'defined') | rejectattr('rc', 'equalto', 0) | list }}
+          ou architecture différente. Le binaire inutilisable va être retiré et
+          le paquet système tenté à sa place.
+      loop: "{{ dotfiles_appimage_dead }}"
       loop_control:
-        label: "{{ item.item.name }}"
+        label: "{{ item.name }}"
+
+    - name: Retirer les AppImages inutilisables et leur déballage
+      ansible.builtin.file:
+        path: "{{ dead_path }}"
+        state: absent
+      loop: "{{ dotfiles_appimage_dead | product(['dest', 'dir']) | list }}"
+      loop_control:
+        label: "{{ item.0.name }} ({{ item.1 }})"
+      vars:
+        dead_path: >-
+          {{ item.0.dest if item.1 == 'dest'
+             else dotfiles_appimage_dir ~ '/' ~ item.0.name }}
+
+    # Le repli que le binaire mort empêchait d'atteindre. Seuls les outils qui
+    # déclarent un `package` en ont un ; pour les autres, le retrait ci-dessus
+    # laisse simplement la capacité absente, ce qui est honnête.
+    - name: Installer par paquet système ce que l'AppImage n'a pas pu fournir
+      ansible.builtin.package:
+        name: "{{ item.package }}"
+        state: present
+      become: true
+      loop: "{{ dotfiles_appimage_dead | selectattr('package', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      ignore_errors: true
+
+    - name: Reconstater les capacités après le repli par paquet
+      ansible.builtin.include_tasks: tasks/detect_tools.yml
+      vars:
+        dotfiles_detect_stage: après repli paquet
+      when: dotfiles_appimage_dead | length > 0
 
     # Une capacité « présente » ne l'est que pour Ansible tant qu'on n'a pas
     # vérifié le PATH de l'utilisateur : detect_tools.yml préfixe LUI-MÊME
