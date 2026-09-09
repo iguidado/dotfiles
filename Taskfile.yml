@@ -11,6 +11,28 @@ vars:
   #   task install BECOME_FLAG=-K
   BECOME_FLAG: ""
 
+  PLAYBOOK: "./ansible/dotfiles.yml"
+  INVENTORY: "./ansible/inventory.ini"
+
+  # Contrat d'interface avec le playbook : les profils sont déclarés côté
+  # ansible, dans ce répertoire. Le Taskfile ne fait que les passer par -e.
+  GROUP_VARS_DIR: "./ansible/group_vars"
+
+  # Racine des packages stow. Le playbook déduit la sienne de sa propre
+  # position ; les tâches qui appellent stow en direct (uninstall, adopt) ont
+  # besoin de la même valeur, exprimée ici une seule fois.
+  STOW_DIR: "./Srcs"
+
+  # Périmètre par défaut : tous les packages présents dans Srcs/. Le glob est
+  # laissé au shell, dans STOW_DIR. Surchargeable pour ne traiter qu'une
+  # capacité :  task uninstall PACKAGES=vim
+  PACKAGES: "*"
+
+  # Profil de déploiement (contrat : variable ansible `dotfiles_profile`).
+  # Vide = le playbook garde son défaut, on ne lui impose rien depuis ici.
+  #   task install PROFILE=minimal
+  PROFILE: ""
+
 tasks:
 
   default:
@@ -50,8 +72,126 @@ tasks:
   install:
     desc: "Install dotfiles on current system (deploy: repo -> $HOME)"
     interactive: true
+    preconditions:
+      - sh: command -v ansible-playbook
+        msg: "ansible-playbook n'est pas installé : lance d'abord ./bootstrap.sh, qui l'installe sans exiger de privilège."
+      # Côté playbook, le chargement du profil est conditionné par
+      # `when: dotfiles_profile_file is exists` : un fichier absent n'est PAS
+      # une erreur (le profil « default » n'en a pas). Une faute de frappe
+      # (PROFILE=minmal) passerait donc sans un mot et déploierait le profil
+      # COMPLET -- avec élévation pour le paquet zsh et changement du shell de
+      # connexion, exactement ce que le profil demandé voulait éviter. Le
+      # garde-fou est ici parce que le playbook ne peut pas distinguer
+      # « pas de profil » de « profil inexistant ».
+      - sh: '[ -z "{{.PROFILE}}" ] || [ "{{.PROFILE}}" = default ] || test -f {{.GROUP_VARS_DIR}}/{{.PROFILE}}.yml'
+        msg: "Profil « {{.PROFILE}} » inconnu : aucun {{.GROUP_VARS_DIR}}/{{.PROFILE}}.yml. Lance `task profiles` pour la liste. Sans ce garde-fou, ansible ignorerait le profil en silence et déploierait le profil complet."
     cmds:
-      - ansible-playbook ./ansible/dotfiles.yml -i ./ansible/inventory.ini {{.BECOME_FLAG}}
+      # PROFILE n'est passé que s'il est renseigné : une valeur vide
+      # écraserait le défaut du playbook par une chaîne vide.
+      - ansible-playbook {{.PLAYBOOK}} -i {{.INVENTORY}} {{.BECOME_FLAG}}{{if .PROFILE}} -e dotfiles_profile={{.PROFILE}}{{end}}
+
+  # Le pendant du seul volet stow d'`install` : ce que stow a posé, stow sait
+  # le retirer. Aucune élévation ici, jamais -- on ne touche qu'à des liens du
+  # HOME. Corollaire à ne pas taire : tout ce qu'`install` fait EN DEHORS de
+  # stow (AppImage neovim, clone oh-my-zsh, paquets système, shell de
+  # connexion dans /etc/passwd) survit intact à cette tâche, qui n'est donc
+  # pas un retour à l'état initial. Le bilan final les liste nommément.
+  # stow -D ne supprime QUE les symlinks qui pointent vers Srcs/ : un fichier
+  # régulier de l'utilisateur (y compris celui qu'`install` a écarté vers
+  # ~/.dotfiles-backup) n'est pas concerné. Le retour arrière est donc sûr,
+  # mais il ne restaure rien : les sauvegardes se remettent en place à la main.
+  uninstall:
+    desc: "Retirer les symlinks posés par stow (repo -> $HOME défait). Aucun privilège requis."
+    dir: "{{.STOW_DIR}}"
+    prompt: "Retirer de ~ les symlinks des packages « {{.PACKAGES}} » ?"
+    preconditions:
+      - sh: command -v stow
+        msg: "stow n'est pas installé : aucun lien n'a pu être posé, il n'y a rien à retirer."
+    cmds:
+      # Un seul appel stow pour tous les packages : stow planifie tout AVANT
+      # d'écrire, donc ~/.stow-global-ignore (fourni par le package `stow`)
+      # est encore lu même s'il fait lui-même partie du retrait. Le découper
+      # package par package casserait cette garantie.
+      - stow --simulate --verbose=2 -D {{.PACKAGES}} -t ~
+      - stow -D {{.PACKAGES}} -t ~
+      # Le bilan énumère ce qui SURVIT, avec la commande de retrait : sans
+      # cela l'utilisateur croit être revenu à son état initial alors que le
+      # seul effet touchant son COMPTE (/etc/passwd) est justement celui que
+      # cette tâche ne sait pas défaire.
+      - cmd: |
+          echo "Symlinks retirés. Ce que « task uninstall » ne défait PAS :"
+          echo "  - fichiers écartés par l'install : à remettre à la main depuis ~/.dotfiles-backup/<horodatage>/"
+          echo "  - oh-my-zsh (plusieurs dizaines de Mo) :  rm -rf ~/.oh-my-zsh"
+          echo "  - AppImage neovim :                       rm -f ~/.local/bin/nvim"
+          # L'avertissement chsh n'a de sens que si le shell de connexion
+          # pointe ENCORE sur zsh : sous le profil minimal, ou quand l'install
+          # n'a pas obtenu le privilège, il serait faux.
+          shell_courant=$(getent passwd "$(id -un)" | cut -d: -f7)
+          case "$shell_courant" in
+            *zsh)
+              echo "  - shell de connexion, resté « $shell_courant » dans /etc/passwd (exige un privilège) :"
+              echo "        chsh -s /bin/bash   # ou la valeur d'origine de ton compte, cf. /etc/shells"
+              ;;
+          esac
+        silent: true
+
+  # Mode d'entrée sur une machine qui a DÉJÀ ses propres dotfiles.
+  #
+  # ATTENTION -- sémantique inversée par rapport à tout le reste du dépôt :
+  # `stow --adopt` ne fusionne pas et ne sauvegarde pas. Pour chaque fichier en
+  # conflit, il DÉPLACE le fichier de la MACHINE par-dessus sa version
+  # versionnée dans Srcs/, puis crée le lien. Autrement dit le dépôt perd son
+  # contenu au profit de celui de la machine, et git est alors le SEUL filet :
+  # d'où le contrôle d'arbre propre avant, et le diff affiché après.
+  # Relecture obligatoire ensuite : `git diff` pour garder, `git checkout --
+  # Srcs` pour rejeter et conserver la version du dépôt (les liens, eux,
+  # restent en place et pointeront alors sur la version restaurée).
+  adopt:
+    desc: "Adopter les dotfiles déjà présents sur la machine (stow --adopt) : ÉCRASE le dépôt par la machine"
+    dir: "{{.STOW_DIR}}"
+    prompt: "stow --adopt va REMPLACER le contenu de Srcs/ par les fichiers de cette machine. Continuer ?"
+    preconditions:
+      - sh: command -v stow
+        msg: "stow n'est pas installé : lance d'abord `task install`."
+      # Sans arbre propre, l'écrasement n'est plus réversible : le travail non
+      # commité de Srcs/ disparaîtrait sans trace.
+      - sh: git -C {{.ROOT_DIR}} diff --quiet -- Srcs && git -C {{.ROOT_DIR}} diff --cached --quiet -- Srcs
+        msg: "Srcs/ contient des modifications non commitées. Commite-les ou mets-les de côté (git stash) avant d'adopter : --adopt les écraserait définitivement."
+      # Même raison pour le non suivi : git ne peut pas restaurer ce qu'il n'a
+      # jamais vu.
+      - sh: 'test -z "$(git -C {{.ROOT_DIR}} ls-files --others --exclude-standard -- Srcs)"'
+        msg: "Srcs/ contient des fichiers non suivis par git, qu'aucun git checkout ne pourra rétablir. Ajoute-les au dépôt (git add) ou écarte-les avant d'adopter."
+    cmds:
+      # Bilan en `defer` et non en commandes suivantes : stow --adopt traite
+      # les packages l'un après l'autre et écrase le dépôt au fur et à mesure.
+      # S'il échoue sur le troisième pour une raison étrangère aux conflits
+      # (permission refusée dans ~, disque plein, cible en lecture seule), les
+      # deux premiers sont DÉJÀ écrasés -- mais un `cmds:` séquentiel s'arrête
+      # à l'erreur, le diff ne s'afficherait jamais et l'utilisateur croirait
+      # que rien n'a eu lieu. Un defer s'exécute quel que soit le code retour.
+      # Les defer se dépilent (LIFO, vérifié sur task 3.53) : le dernier
+      # déclaré s'affiche en premier, d'où l'ordre inversé ci-dessous.
+      - defer: 'echo "Relis ce diff : « git diff -- Srcs » pour inspecter, « git checkout -- Srcs » pour rejeter et rétablir la version du dépôt."'
+      - defer: git -C {{.ROOT_DIR}} --no-pager diff --stat -- Srcs
+      - defer: echo "--- Ce que la machine vient d'imposer au dépôt ---"
+      - stow --no-folding --adopt {{.PACKAGES}} -t ~
+
+  # Le profil n'est pas défini ici : le recopier dans le Taskfile en ferait une
+  # seconde source de vérité, fausse dès le premier ajout côté ansible. Cette
+  # tâche se contente donc de montrer ce que le dépôt déclare.
+  profiles:
+    desc: "Montrer les profils déclarés côté ansible (puis : task install PROFILE=<nom>)"
+    cmds:
+      - cmd: |
+          if [ ! -d {{.GROUP_VARS_DIR}} ]; then
+            echo "Aucun {{.GROUP_VARS_DIR}} : le dépôt ne déclare pas encore de profil, le playbook garde son défaut."
+            exit 0
+          fi
+          echo "Profils déclarés dans {{.GROUP_VARS_DIR}} :"
+          grep -rn "profile" {{.GROUP_VARS_DIR}} || echo "  (aucune mention de profil)"
+          echo
+          echo "Usage : task install PROFILE=<nom>"
+        silent: true
 
   status:
     desc: "Show what is not yet backed up"
