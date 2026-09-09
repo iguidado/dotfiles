@@ -13,6 +13,14 @@
     # de ce playbook qui modifie le compte lui-même : elle reste débrayable.
     dotfiles_set_login_shell: true
 
+    # stow refuse de toucher à un fichier régulier et n'a aucun mode
+    # interactif : `--override` ne vaut que pour les liens qu'il gère déjà, et
+    # `--adopt` ferait l'inverse de ce qu'on veut (importer le fichier de la
+    # machine dans le dépôt). Les fichiers préexistants sont donc DÉPLACÉS ici,
+    # jamais supprimés. Mettre à false pour retrouver l'arrêt sur conflit.
+    dotfiles_backup_conflicts: true
+    dotfiles_backup_dir: "{{ ansible_user_dir }}/.dotfiles-backup/{{ ansible_date_time.iso8601_basic_short }}"
+
   tasks:
     # Ce playbook configure un espace UTILISATEUR : une fois stow présent, plus
     # aucune tâche n'exige de privilège. L'élévation n'est donc tentée que dans
@@ -64,13 +72,83 @@
       register: stow_simulation
       # Disable tracking of change, this command is never considered as impacting system
       changed_when: false
+      # rc=1 signale un conflit. On veut l'inspecter et le résoudre, donc cette
+      # simulation ne doit pas interrompre le play à elle seule.
+      failed_when: false
+
+    # Un SEUL fichier préexistant fait échouer le déploiement de TOUS les
+    # packages : stow annule tout dès le premier conflit. Le cas est banal --
+    # la box Ubuntu 2204 livre par exemple son propre ~/.vimrc.
+    # Deux formats de message coexistent selon la version de stow :
+    #   2.4.x  CONFLICT when stowing gdb: cannot stow <src> over existing
+    #          target .gdbinit since neither a link nor a directory [...]
+    #   2.3.x  CONFLICT when stowing vim: existing target is neither a link
+    #          nor a directory: .vimrc
+    # Une seule règle ne couvre pas les deux, d'où les deux passes. Toute ligne
+    # qu'aucune ne sait réduire à un chemin est écartée : elle ne sera pas
+    # sauvegardée, et la replanification s'arrêtera dessus plutôt que de
+    # déplacer n'importe quoi.
+    - name: Recenser les fichiers en conflit
+      ansible.builtin.set_fact:
+        stow_conflicts: >-
+          {{ stow_simulation.stderr_lines
+             | select('search', '^CONFLICT when stowing')
+             | map('regex_replace', '^.*over existing target (\S+) since .*$', '\1')
+             | map('regex_replace', '^CONFLICT when stowing [^:]+: .*: (\S+)$', '\1')
+             | reject('search', ' ')
+             | list | unique }}
+
+    - name: Créer l'arborescence de sauvegarde
+      ansible.builtin.file:
+        path: "{{ dotfiles_backup_dir }}/{{ item | dirname }}"
+        state: directory
+        mode: "0700"
+      loop: "{{ stow_conflicts }}"
+      when: dotfiles_backup_conflicts | bool
+
+    # `mv`, pas `rm` : le contenu reste récupérable. `removes` rend la tâche
+    # idempotente si le fichier a déjà été écarté.
+    - name: Écarter les fichiers en conflit vers la sauvegarde
+      ansible.builtin.command:
+        cmd: "mv -- {{ ansible_user_dir }}/{{ item }} {{ dotfiles_backup_dir }}/{{ item }}"
+        removes: "{{ ansible_user_dir }}/{{ item }}"
+      loop: "{{ stow_conflicts }}"
+      when: dotfiles_backup_conflicts | bool
+
+    - name: Signaler les fichiers écartés
+      ansible.builtin.debug:
+        msg: >-
+          Fichiers préexistants déplacés vers {{ dotfiles_backup_dir }} :
+          {{ stow_conflicts | join(', ') }}
+      when:
+        - stow_conflicts | length > 0
+        - dotfiles_backup_conflicts | bool
+
+    # Le plan de référence est celui d'APRÈS la sauvegarde : c'est lui qui
+    # décide de l'application, et lui qui doit être propre.
+    - name: Replanifier après sauvegarde
+      ansible.builtin.shell: "stow --no-folding --simulate --verbose=2 * -t ~"
+      args:
+        chdir: "{{ dotfiles_stow_dir }}"
+      register: stow_plan
+      changed_when: false
+      failed_when: false
+
+    - name: Arrêt si des conflits subsistent
+      ansible.builtin.fail:
+        msg: >-
+          stow signale des conflits qui n'ont pas pu être résolus
+          {{ 'automatiquement' if dotfiles_backup_conflicts | bool
+             else '(sauvegarde désactivée via dotfiles_backup_conflicts)' }} :
+          {{ stow_plan.stderr }}
+      when: stow_plan.rc != 0
 
     - name: Appliquer Stow (uniquement si des changements ont été détectés)
       ansible.builtin.shell: "stow --no-folding * -t ~"
       args:
         chdir: "{{ dotfiles_stow_dir }}"
       # This task is only executed when simulation return contain the word 'LINK'
-      when: "'LINK' in stow_simulation.stderr or 'LINK' in stow_simulation.stdout"
+      when: "'LINK' in stow_plan.stderr or 'LINK' in stow_plan.stdout"
       register: result
 
     - name: check result
