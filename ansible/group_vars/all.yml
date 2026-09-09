@@ -1,0 +1,109 @@
+---
+# Variables par défaut de tous les hôtes du playbook.
+#
+# Ce fichier est chargé automatiquement : il est adjacent à l'inventaire ET au
+# playbook. `all` est le groupe de plus BASSE précédence, ce qui permet à un
+# profil (group_vars/<profil>.yml) de le surcharger sans dépendre de l'ordre
+# alphabétique des groupes. Rien de tout cela ne fonctionnerait si ces valeurs
+# étaient dans le `vars:` du play : celui-ci prime sur les group_vars.
+
+# Profil actif. Deux chemins équivalents pour en changer :
+#   - ansible-playbook ansible/dotfiles.yml -e dotfiles_profile=minimal
+#   - ranger l'hôte dans le groupe d'inventaire `minimal`
+# Dans les deux cas c'est ansible/group_vars/<profil>.yml qui s'applique.
+dotfiles_profile: default
+
+# Périmètre du DÉPLOIEMENT -- à ne pas confondre avec `dotfiles_tools`, qui dit
+# ce qu'on INSTALLE. Les deux doivent être tenus ensemble : un profil qui retire
+# une capacité sans retirer le paquet stow correspondant pose un dotfile qui
+# référence un outil absent (Srcs/zsh/.zshrc fait `source $ZSH/oh-my-zsh.sh` :
+# sans oh-my-zsh, chaque ouverture de shell affiche une erreur).
+# La valeur est passée telle quelle au shell, depuis Srcs/ : `*` reste un glob
+# (tous les paquets non cachés), une restriction s'écrit en toutes lettres,
+# séparée par des espaces. Le paquet `stow` est à garder dans tous les cas :
+# c'est lui qui porte ~/.stow-global-ignore.
+dotfiles_stow_packages: '*'
+
+# Table des CAPACITÉS -- pas des paquets. Une entrée décrit ce dont on a besoin
+# et les moyens de l'obtenir, rangés du moins privilégié au plus privilégié :
+#
+#   name       étiquette lisible, sert aussi de clé dans dotfiles_tool_paths
+#   check      binaire dont la présence atteste la capacité
+#   check_cmd  test shell alternatif quand la capacité n'est pas un binaire
+#   appimage   URL d'une AppImage à déposer dans ~/.local/bin   (userland)
+#   git        dépôt à cloner dans le HOME                      (userland)
+#   dest       destination des moyens userland
+#   package    nom du paquet système                            (exige sudo)
+#   required   true = son absence arrête le play ; sinon simple avertissement
+#   hint       message actionnable affiché si la capacité reste absente
+#
+# Le moteur qui consomme cette table (ansible/tasks/detect_tools.yml + section
+# « Capacités » du playbook) applique toujours le même ordre : capacité déjà
+# là -> moyen userland -> paquet système avec élévation -> avertissement. Le
+# privilège reste une capacité détectée, jamais un prérequis.
+dotfiles_tools:
+  - name: stow
+    check: stow
+    # Aucun moyen userland raisonnable : stow est du Perl à installer, et le
+    # compiler serait plus fragile que de le réclamer à un administrateur.
+    package: stow
+    required: true
+    hint: >-
+      stow est absent et n'a pas pu être installé : ce compte ne dispose pas du
+      privilège nécessaire. Fais installer le paquet `stow` par un
+      administrateur, ou compile-le dans ~/.local, puis relance `task install`.
+
+  - name: zsh
+    check: zsh
+    package: zsh
+    hint: >-
+      zsh est absent et n'a pas pu être installé : ce compte ne dispose pas du
+      privilège nécessaire. Les dotfiles sont déployés, mais le shell de
+      connexion restera inchangé tant qu'un administrateur n'aura pas installé
+      le paquet `zsh`.
+
+  - name: oh-my-zsh
+    # La capacité n'est pas un binaire : Srcs/zsh/.zshrc fait
+    # `source $ZSH/oh-my-zsh.sh`, donc sans ce clone toute ouverture de shell
+    # échoue sur une machine fraîche. D'où check_cmd plutôt que check.
+    check_cmd: "test -d {{ ansible_user_dir }}/.oh-my-zsh"
+    git: https://github.com/ohmyzsh/ohmyzsh.git
+    git_version: master
+    dest: "{{ ansible_user_dir }}/.oh-my-zsh"
+    hint: >-
+      oh-my-zsh n'a pas pu être cloné (réseau ?). Le .zshrc déployé le charge :
+      tant qu'il manque, chaque ouverture de shell affichera une erreur.
+      À faire toi-même :
+      git clone --depth 1 https://github.com/ohmyzsh/ohmyzsh.git ~/.oh-my-zsh
+
+  - name: neovim
+    check: nvim
+    # L'AppImage passe en premier parce qu'elle ne demande aucun privilège et
+    # livre un neovim récent, là où les dépôts des distributions LTS en
+    # livrent un très ancien. Trois pièges à connaître :
+    #   - l'asset s'appelait `nvim.appimage` jusqu'à la v0.11 ; ce nom renvoie
+    #     désormais un 404 sur /releases/latest/download/ ;
+    #   - elle est propre à l'ARCHITECTURE : sur arm64 le téléchargement
+    #     échoue en 404 (surcharger l'entrée dans un profil avec
+    #     nvim-linux-arm64.appimage, ou laisser le paquet système prendre le
+    #     relais) ;
+    #   - elle est liée à la GLIBC : sur une cible musl (Alpine, dont la VM
+    #     mini_alpine de Test/Vagrantfile) le téléchargement RÉUSSIT et le
+    #     binaire ne démarre jamais.
+    appimage: https://github.com/neovim/neovim/releases/latest/download/nvim-linux-x86_64.appimage
+    dest: "{{ ansible_user_dir }}/.local/bin/nvim"
+    # Dernier recours, dans l'ordre habituel userland -> paquet système : une
+    # version ancienne de neovim vaut mieux qu'aucun éditeur. Il ne sert que
+    # si le téléchargement a ÉCHOUÉ (réseau coupé, architecture sans asset) ;
+    # une AppImage téléchargée mais inexécutable, elle, fait passer la
+    # capacité pour présente -- c'est le rôle du contrôle de démarrage du
+    # playbook de le dire, et du hint ci-dessous de donner la manœuvre.
+    package: neovim
+    hint: >-
+      neovim reste absent. Trois causes possibles : accès réseau à github.com,
+      architecture non x86_64 (l'asset n'existe pas, l'URL renvoie 404), ou
+      privilège indisponible pour le paquet système en dernier recours.
+      À faire toi-même : dépose une AppImage exécutable dans
+      ~/.local/bin/nvim, ou fais installer le paquet `neovim`. Si un
+      ~/.local/bin/nvim inutilisable traîne déjà, supprime-le d'abord : il
+      masquerait le paquet système dans ton PATH.

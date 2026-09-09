@@ -1,5 +1,12 @@
+# Ce play est PRIVILÉGIÉ et destructeur : il désinstalle docker.io/containerd/
+# runc avant de poser docker-ce. Il ne doit donc jamais hériter d'une cible par
+# défaut. `hosts: all` combiné à l'inventaire par défaut d'ansible.cfg suffisait
+# à faire de `ansible-playbook ansible/container_base.yml` (sans -i, depuis la
+# racine) une réécriture de la pile Docker de la machine de développement.
+# On cible désormais un groupe qui n'existe que si on l'a délibérément peuplé :
+# voir la section [containers] de ansible/inventory.ini.
 - name: create requirement for containerization at user_level
-  hosts: all
+  hosts: containers
   become: true
 
 

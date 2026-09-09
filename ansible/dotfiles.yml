@@ -1,5 +1,11 @@
+# Le play cible le groupe `dotfiles`, jamais `all` : un hôte doit être déclaré
+# quelque part pour recevoir des dotfiles. Contrepartie à connaître -- le
+# provisioner ansible de Vagrant génère un inventaire où les invités
+# n'appartiennent à AUCUN groupe nommé ; Test/Vagrantfile doit donc déclarer
+# `ansible.groups` pour reconstruire ce groupe, faute de quoi le play ne
+# matcherait plus rien et réussirait en silence (play skipped, rc=0).
 - name: install dotfiles with Stow
-  hosts: all
+  hosts: dotfiles
 
   vars:
     # Racine du dépôt déduite de l'emplacement de ce playbook : une exécution
@@ -11,6 +17,8 @@
 
     # Changer le shell de connexion touche /etc/passwd. C'est la seule action
     # de ce playbook qui modifie le compte lui-même : elle reste débrayable.
+    # Un profil peut la désactiver : les variables chargées par include_vars
+    # priment sur ce bloc `vars:`.
     dotfiles_set_login_shell: true
 
     # stow refuse de toucher à un fichier régulier et n'a aucun mode
@@ -21,39 +29,231 @@
     dotfiles_backup_conflicts: true
     dotfiles_backup_dir: "{{ ansible_user_dir }}/.dotfiles-backup/{{ ansible_date_time.iso8601_basic_short }}"
 
-  tasks:
-    # Ce playbook configure un espace UTILISATEUR : une fois stow présent, plus
-    # aucune tâche n'exige de privilège. L'élévation n'est donc tentée que dans
-    # le seul cas qui l'impose -- stow absent -- et son échec n'est pas fatal
-    # en lui-même : il est traduit en message actionnable. Un compte sans sudo
-    # reste utilisable dès lors que stow est fourni par l'administrateur.
-    - name: Vérifier si stow est déjà disponible
-      ansible.builtin.shell: command -v stow
-      register: stow_binary
-      changed_when: false
-      failed_when: false
+    # Chemin réel du zsh constaté par le moteur de capacités, vide s'il reste
+    # introuvable. Une var de play est évaluée au moment de son usage : elle
+    # peut donc s'appuyer sur un fait produit plus tard dans le play.
+    dotfiles_zsh_path: "{{ (dotfiles_tool_paths | default({}))['zsh'] | default('') }}"
 
-    # `package` choisit apt/apk/dnf selon la cible : Alpine n'échoue plus faute
-    # de branche dédiée.
-    - name: install stow
-      ansible.builtin.package:
-        name: stow
-        state: present
-      become: true
-      when: stow_binary.rc != 0
-      register: stow_install
+  tasks:
+    # --- Capacités ----------------------------------------------------------
+    # Une SEULE construction répond à deux besoins : choisir entre plusieurs
+    # moyens d'obtenir un outil, et faire varier la liste des outils selon le
+    # profil. Tout est en données dans ansible/group_vars/ ; les tâches
+    # ci-dessous ne sont qu'un moteur qui déroule toujours le même ordre :
+    #   capacité déjà présente -> moyen userland -> paquet système -> avertir.
+    # Ce que faisaient déjà stow et zsh à la main, pour tous les outils.
+
+    # Un profil passé en ligne de commande (-e dotfiles_profile=...) ne
+    # déclenche AUCUN chargement automatique : seule l'appartenance à un groupe
+    # d'inventaire homonyme le fait. On va donc chercher le fichier nous-même.
+    # Seul « default » a le droit de ne pas avoir de fichier : group_vars/all.yml
+    # fait alors foi.
+    # Un profil inconnu ne doit PAS être ignoré en silence : le `when` ci-dessous
+    # ferait sauter l'include_vars, le play repartirait sur la table par défaut
+    # et se terminerait en succès. Une faute de frappe (`PROFILE=minimial`)
+    # déploierait alors exactement le contraire de ce qui a été demandé, sans un
+    # mot. On échoue donc avant, en listant les profils réellement disponibles.
+    # `fileglob` et le test `exists` regardent le CONTRÔLEUR, là où vit le dépôt.
+    - name: Vérifier que le profil demandé existe
+      ansible.builtin.assert:
+        that: dotfiles_profile == 'default' or dotfiles_profile_file is exists
+        fail_msg: >-
+          Profil « {{ dotfiles_profile }} » inconnu : {{ dotfiles_profile_file }}
+          n'existe pas. Profils disponibles : default,
+          {{ dotfiles_profiles_available | join(', ') }}.
+        quiet: true
+      vars:
+        dotfiles_profile_file: "{{ playbook_dir }}/group_vars/{{ dotfiles_profile }}.yml"
+        # group_vars/all.yml n'est pas un profil : c'est le socle que les
+        # profils surchargent.
+        dotfiles_profiles_available: >-
+          {{ query('fileglob', playbook_dir ~ '/group_vars/*.yml')
+             | map('basename') | map('regex_replace', '\.yml$', '')
+             | reject('equalto', 'all') | sort | list }}
+
+    - name: Charger la surcharge du profil demandé
+      ansible.builtin.include_vars:
+        file: "{{ dotfiles_profile_file }}"
+      vars:
+        dotfiles_profile_file: "{{ playbook_dir }}/group_vars/{{ dotfiles_profile }}.yml"
+      when: dotfiles_profile_file is exists
+
+    - name: Détecter les capacités présentes
+      ansible.builtin.include_tasks: tasks/detect_tools.yml
+      vars:
+        dotfiles_detect_stage: état initial
+
+    # ~/.local/bin est le seul emplacement d'installation qui ne demande aucun
+    # privilège. Il doit exister avant tout dépôt d'AppImage.
+    # Pas de `mode:` volontairement : le répertoire existe presque toujours
+    # déjà, et lui imposer des permissions reviendrait à modifier le HOME de
+    # l'utilisateur pour rien. À la création, l'umask suffit.
+    - name: Préparer ~/.local/bin
+      ansible.builtin.file:
+        path: "{{ ansible_user_dir }}/.local/bin"
+        state: directory
+
+    # Moyen userland n°1 : AppImage. `mode: 0755` vaut le chmod +x -- une
+    # AppImage non exécutable est un fichier mort.
+    # RÉSERVE : une AppImage a besoin de FUSE pour se monter. Sur une machine
+    # sans fuse2 (conteneurs, Alpine nu, VM minimales), le binaire téléchargé
+    # se lance mais sort en erreur. Le repli est `--appimage-extract`, qui
+    # déballe l'archive et se passe de FUSE ; il n'est pas automatisé ici, la
+    # vérification plus bas affiche la commande exacte à passer.
+    - name: Installer les capacités manquantes par AppImage
+      ansible.builtin.get_url:
+        url: "{{ item.appimage }}"
+        dest: "{{ item.dest }}"
+        mode: "0755"
+      loop: "{{ dotfiles_missing | selectattr('appimage', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      # Réseau coupé, miroir GitHub inaccessible : c'est un outil en moins, pas
+      # un déploiement de dotfiles raté. Le bilan final tranchera.
       ignore_errors: true
 
-    - name: Arrêt explicite si stow reste indisponible
-      ansible.builtin.fail:
+    # Moyen userland n°2 : clone dans le HOME. `update: false` garde la tâche
+    # idempotente et ne réécrit pas un clone existant à chaque exécution.
+    - name: Installer les capacités manquantes par clone git
+      ansible.builtin.git:
+        repo: "{{ item.git }}"
+        dest: "{{ item.dest }}"
+        depth: 1
+        version: "{{ item.git_version | default('HEAD') }}"
+        update: false
+      loop: "{{ dotfiles_missing | selectattr('git', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      ignore_errors: true
+
+    - name: Reconstater les capacités après les moyens userland
+      ansible.builtin.include_tasks: tasks/detect_tools.yml
+      vars:
+        dotfiles_detect_stage: après moyens userland
+
+    # Dernier recours seulement : c'est la seule étape qui réclame du
+    # privilège, et elle ne concerne plus que ce qu'aucun moyen userland n'a su
+    # fournir. `package` choisit apt/apk/dnf selon la cible : Alpine n'échoue
+    # plus faute de branche dédiée. Un échec d'élévation n'est pas fatal ici,
+    # il est traduit en message actionnable par le bilan.
+    - name: Installer les capacités restantes par paquet système
+      ansible.builtin.package:
+        name: "{{ item.package }}"
+        state: present
+      become: true
+      loop: "{{ dotfiles_missing | selectattr('package', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      ignore_errors: true
+
+    - name: Établir le bilan des capacités
+      ansible.builtin.include_tasks: tasks/detect_tools.yml
+      vars:
+        dotfiles_detect_stage: bilan
+
+    # Une AppImage peut être là, exécutable, et refuser de démarrer faute de
+    # FUSE. La seule preuve qui vaille est de la lancer.
+    - name: Vérifier que les AppImages installées démarrent
+      ansible.builtin.command:
+        cmd: "{{ item.dest }} --version"
+      # Uniquement les AppImages réellement posées à leur `dest` : une AppImage
+      # jamais téléchargée est un problème de réseau (le bilan le dit déjà), et
+      # un outil trouvé ailleurs dans le PATH n'est pas une AppImage du tout.
+      loop: >-
+        {{ dotfiles_tools | selectattr('appimage', 'defined')
+           | selectattr('dest', 'in', dotfiles_tool_paths.values() | list)
+           | list }}
+      loop_control:
+        label: "{{ item.name }}"
+      register: dotfiles_appimage_smoke
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Avertir des AppImages qui ne démarrent pas
+      ansible.builtin.debug:
         msg: >-
-          stow est absent et n'a pas pu être installé : ce compte ne dispose
-          pas du privilège nécessaire. Fais installer le paquet `stow` par un
-          administrateur, ou compile-le dans ~/.local, puis relance
-          `task install`.
+          {{ item.item.name }} est installé mais ne démarre pas. Trois causes,
+          à trancher avec `{{ item.item.dest }} --version` :
+          FUSE absent (paquet `fuse` ou `fuse2`) -- repli sans privilège :
+          cd ~/.local/bin && ./{{ item.item.dest | basename }} --appimage-extract
+          puis pointer {{ item.item.dest }} sur squashfs-root/AppRun ;
+          libc incompatible (l'AppImage est liée à la glibc, elle ne peut pas
+          tourner sur une musl comme Alpine) ou architecture différente --
+          dans ces deux cas l'extraction ne changera rien : supprime
+          {{ item.item.dest }}, sinon il masquera dans ton PATH le paquet
+          système que le playbook peut installer à sa place.
+      loop: >-
+        {{ dotfiles_appimage_smoke.results
+           | selectattr('rc', 'defined') | rejectattr('rc', 'equalto', 0) | list }}
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: dotfiles_appimage_smoke.results is defined
+
+    # Une capacité « présente » ne l'est que pour Ansible tant qu'on n'a pas
+    # vérifié le PATH de l'utilisateur : detect_tools.yml préfixe LUI-MÊME
+    # ~/.local/bin, donc une AppImage tout juste posée s'y prouve trouvable quoi
+    # qu'il arrive. Srcs/zsh/.zshrc exporte bien ~/.local/bin, mais ce PATH-là
+    # ne vaut qu'une fois le dotfile DÉPLOYÉ et un nouveau shell ouvert, et zsh
+    # en shell de connexion ne lit ni /etc/profile.d ni ~/.profile : sans ce
+    # contrôle le play annonce un succès pour une commande que l'utilisateur ne
+    # peut pas encore appeler.
+    # On interroge le shell de CONNEXION (`-lc`), pas celui d'Ansible ; zsh s'il
+    # a été constaté, sh sinon -- qui est alors bien le shell en place.
+    - name: Lire le PATH d'un shell de connexion
+      ansible.builtin.command:
+        argv:
+          - "{{ dotfiles_zsh_path if dotfiles_zsh_path | length > 0 else 'sh' }}"
+          - "-lc"
+          - "echo $PATH"
+      register: dotfiles_login_path
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Avertir des capacités hors du PATH du shell de connexion
+      ansible.builtin.debug:
+        msg: >-
+          {{ item.name }} est installé dans {{ item.dest | dirname }}, mais ce
+          répertoire n'est pas dans le PATH de ton shell de connexion : la
+          commande `{{ item.check }}` restera introuvable malgré l'installation.
+          Srcs/zsh/.zshrc l'y ajoute (« export PATH=$HOME/bin:$HOME/.local/bin:
+          $PATH ») : rouvre un shell une fois les dotfiles déployés. Si ton
+          shell de connexion n'est pas ce zsh-là, ajoute la même ligne à son
+          fichier d'initialisation.
+      # Uniquement les capacités binaires réellement fournies par un moyen
+      # userland, à leur `dest` : un outil trouvé ailleurs vient du système et
+      # son répertoire est forcément déjà dans le PATH.
+      loop: >-
+        {{ dotfiles_tools | selectattr('check', 'defined') | selectattr('dest', 'defined')
+           | selectattr('dest', 'in', dotfiles_tool_paths.values() | list) | list }}
+      loop_control:
+        label: "{{ item.name }}"
       when:
-        - stow_binary.rc != 0
-        - stow_install is failed
+        - dotfiles_login_path.stdout is defined
+        - item.dest | dirname not in dotfiles_login_path.stdout.split(':')
+
+    - name: Avertir des capacités restées absentes
+      ansible.builtin.debug:
+        msg: "{{ item.hint | default(item.name ~ ' est absent et n’a pas pu être installé.') }}"
+      loop: "{{ dotfiles_missing }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: not (item.required | default(false) | bool)
+
+    # Seules les capacités marquées `required` arrêtent le play : sans stow, il
+    # n'y a tout simplement rien à déployer.
+    - name: Arrêt explicite si une capacité indispensable manque
+      ansible.builtin.fail:
+        msg: "{{ item.hint | default(item.name ~ ' est indispensable et reste absent.') }}"
+      loop: "{{ dotfiles_missing }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: item.required | default(false) | bool
+
+    # --- Déploiement des dotfiles -------------------------------------------
+    # Ce playbook configure un espace UTILISATEUR : une fois stow présent, plus
+    # aucune tâche n'exige de privilège.
 
     # ~/.stow-global-ignore carries the secret-exclusion rules, but stow reads
     # it at startup. It must therefore be in place BEFORE any other package is
@@ -65,8 +265,44 @@
         chdir: "{{ dotfiles_stow_dir }}"
         creates: "{{ ansible_user_dir }}/.stow-global-ignore"
 
+    # Les paquets stow présents dans le dépôt, tels que le glob `*` les voit :
+    # mêmes règles d'exclusion (pas de répertoire caché).
+    - name: Lister les paquets stow du dépôt
+      ansible.builtin.find:
+        paths: "{{ dotfiles_stow_dir }}"
+        file_type: directory
+        recurse: false
+      register: stow_packages
+
+    # `dotfiles_stow_packages` part au shell tel quel ; l'assertion de plan plus
+    # bas a besoin, elle, du DÉCOMPTE attendu. Il faut donc résoudre le glob de
+    # notre côté : sinon l'assertion comparerait le plan restreint d'un profil
+    # au nombre total de répertoires de Srcs/ et échouerait à tort.
+    - name: Établir la liste effective des paquets à stower
+      ansible.builtin.set_fact:
+        stow_effective_packages: >-
+          {{ stow_present
+             if dotfiles_stow_packages | trim == '*'
+             else dotfiles_stow_packages.split() }}
+      vars:
+        stow_present: "{{ stow_packages.files | map(attribute='path') | map('basename') | list }}"
+
+    # Un paquet mal orthographié dans un profil ferait échouer stow avec un
+    # message à lui ; on préfère nommer la variable fautive.
+    - name: Vérifier que les paquets demandés existent dans le dépôt
+      ansible.builtin.assert:
+        that: stow_effective_packages | difference(stow_present) | length == 0
+        fail_msg: >-
+          dotfiles_stow_packages demande des paquets absents de
+          {{ dotfiles_stow_dir }} :
+          {{ stow_effective_packages | difference(stow_present) | join(', ') }}.
+          Présents : {{ stow_present | sort | join(', ') }}.
+        quiet: true
+      vars:
+        stow_present: "{{ stow_packages.files | map(attribute='path') | map('basename') | list }}"
+
     - name: Simulate Stow Execution
-      ansible.builtin.shell: "stow --no-folding --simulate --verbose=2 * -t ~"
+      ansible.builtin.shell: "stow --no-folding --simulate --verbose=2 {{ dotfiles_stow_packages }} -t ~"
       args:
         chdir: "{{ dotfiles_stow_dir }}"
       register: stow_simulation
@@ -75,6 +311,9 @@
       # rc=1 signale un conflit. On veut l'inspecter et le résoudre, donc cette
       # simulation ne doit pas interrompre le play à elle seule.
       failed_when: false
+      # --simulate n'écrit rien : la tâche doit tourner aussi en --check, sinon
+      # le mode simulation d'Ansible ne dirait rien du plan de stow.
+      check_mode: false
 
     # Un SEUL fichier préexistant fait échouer le déploiement de TOUS les
     # packages : stow annule tout dès le premier conflit. Le cas est banal --
@@ -127,13 +366,17 @@
     # Le plan de référence est celui d'APRÈS la sauvegarde : c'est lui qui
     # décide de l'application, et lui qui doit être propre.
     - name: Replanifier après sauvegarde
-      ansible.builtin.shell: "stow --no-folding --simulate --verbose=2 * -t ~"
+      ansible.builtin.shell: "stow --no-folding --simulate --verbose=2 {{ dotfiles_stow_packages }} -t ~"
       args:
         chdir: "{{ dotfiles_stow_dir }}"
       register: stow_plan
       changed_when: false
       failed_when: false
+      check_mode: false
 
+    # En --check, la mise à l'écart des fichiers en conflit n'a PAS eu lieu :
+    # stow les signale donc forcément encore, et échouer ici ne dirait rien de
+    # l'état réel du dépôt. Le mode simulation se contente de rapporter.
     - name: Arrêt si des conflits subsistent
       ansible.builtin.fail:
         msg: >-
@@ -141,82 +384,83 @@
           {{ 'automatiquement' if dotfiles_backup_conflicts | bool
              else '(sauvegarde désactivée via dotfiles_backup_conflicts)' }} :
           {{ stow_plan.stderr }}
-      when: stow_plan.rc != 0
+      when:
+        - stow_plan.rc != 0
+        - not ansible_check_mode
 
-    - name: Appliquer Stow (uniquement si des changements ont été détectés)
-      ansible.builtin.shell: "stow --no-folding * -t ~"
-      args:
-        chdir: "{{ dotfiles_stow_dir }}"
-      # This task is only executed when simulation return contain the word 'LINK'
-      when: "'LINK' in stow_plan.stderr or 'LINK' in stow_plan.stdout"
-      register: result
-
-    - name: check result
-      ansible.builtin.debug:
-        var: result
-
-    # --- Environnement shell -------------------------------------------------
-    # Srcs/zsh/.zshrc fait `source $ZSH/oh-my-zsh.sh` : sans oh-my-zsh, chaque
-    # ouverture de shell échoue sur une machine fraîche. Déployer le dotfile ne
-    # suffit donc pas, il faut fournir ce dont il dépend.
-    #
-    # Même règle que pour stow : le privilège n'est sollicité que là où il est
-    # indispensable (le paquet zsh, le shell de connexion). Le clone
-    # d'oh-my-zsh, lui, est du userland pur.
-
-    - name: Vérifier si zsh est déjà disponible
-      ansible.builtin.shell: command -v zsh
-      register: zsh_binary
-      changed_when: false
-      failed_when: false
-
-    - name: install zsh
-      ansible.builtin.package:
-        name: zsh
-        state: present
-      become: true
-      when: zsh_binary.rc != 0
-      register: zsh_install
-      ignore_errors: true
-
-    # Le chemin doit être relu : s'il vient d'être installé, la détection
-    # initiale n'a rien capturé.
-    - name: Localiser zsh
-      ansible.builtin.shell: command -v zsh
-      register: zsh_path
-      changed_when: false
-      failed_when: false
-
-    - name: Avertir si zsh reste indisponible
+    - name: Signaler les conflits qu'un --check ne peut pas lever
       ansible.builtin.debug:
         msg: >-
-          zsh est absent et n'a pas pu être installé : ce compte ne dispose pas
-          du privilège nécessaire. Les dotfiles sont déployés, mais le shell de
-          connexion restera inchangé tant qu'un administrateur n'aura pas
-          installé le paquet `zsh`.
-      when: zsh_path.rc != 0
+          Mode simulation : les {{ stow_conflicts | length }} fichier(s) en
+          conflit n'ont pas été déplacés, stow les rapporte donc encore. Une
+          exécution réelle les sauvegarderait dans {{ dotfiles_backup_dir }}
+          avant de reposer le plan.
+      when:
+        - stow_plan.rc != 0
+        - ansible_check_mode
 
-    # oh-my-zsh vit dans le HOME : aucun privilège. `update: false` garde la
-    # tâche idempotente et ne réécrit pas un clone existant à chaque exécution.
-    - name: Installer oh-my-zsh
-      ansible.builtin.git:
-        repo: https://github.com/ohmyzsh/ohmyzsh.git
-        dest: "{{ ansible_user_dir }}/.oh-my-zsh"
-        depth: 1
-        version: master
-        update: false
+    # POURQUOI PAS `'LINK' in stow_plan.stderr` : cette version cherchait une
+    # sous-chaîne n'importe où dans la sortie. Deux façons de se tromper, dont
+    # une silencieuse et donc bien pire :
+    #   - un chemin contenant « LINK » (~/LINKS, un paquet nommé ainsi) suffit
+    #     à déclencher une application inutile ;
+    #   - si stow change de formulation, plus aucun « LINK » n'apparaît : le
+    #     play se déclare OK sans avoir rien déployé, et rien ne le signale.
+    # On lit donc deux marqueurs de LIGNE, ancrés en colonne 0 :
+    #   « LINK: »                     -> il reste des liens à poser ;
+    #   « Planning stow of package »  -> stow a bien produit un plan lisible.
+    # Le second est le garde-fou : croisé avec le nombre de paquets réellement
+    # présents, il transforme la panne silencieuse en échec bruyant.
+    # Vérifié sur stow 2.4.1 : tout le verbeux part sur stderr, stdout reste
+    # vide -- les deux flux sont concaténés pour ne pas dépendre de ce choix.
+    - name: Lire le plan de stow
+      ansible.builtin.set_fact:
+        stow_pending_links: "{{ plan_lines | select('match', '^LINK: ') | list }}"
+        stow_planned_packages: "{{ plan_lines | select('match', '^Planning stow of package .*\\.\\.\\. done$') | list | length }}"
+      vars:
+        plan_lines: "{{ stow_plan.stderr_lines + stow_plan.stdout_lines }}"
+
+    # La référence est le périmètre DEMANDÉ (stow_effective_packages), pas le
+    # contenu de Srcs/ : un profil qui restreint la liste ferait sinon échouer
+    # cette assertion alors que tout se passe comme prévu.
+    - name: Vérifier que le plan de stow est toujours lisible
+      ansible.builtin.assert:
+        that: stow_planned_packages | int == stow_effective_packages | length
+        fail_msg: >-
+          Plan illisible : {{ stow_planned_packages }} paquet(s) planifié(s)
+          pour {{ stow_effective_packages | length }} demandé(s)
+          ({{ stow_effective_packages | join(', ') }}). stow a probablement
+          changé de sortie ; corrige la détection plutôt que de la contourner,
+          sinon le play continuerait à réussir sans rien déployer.
+        success_msg: >-
+          Plan lisible : {{ stow_effective_packages | length }} paquet(s),
+          {{ stow_pending_links | length }} lien(s) à poser.
+        quiet: true
+
+    - name: Appliquer Stow (uniquement si des liens restent à poser)
+      ansible.builtin.shell: "stow --no-folding {{ dotfiles_stow_packages }} -t ~"
+      args:
+        chdir: "{{ dotfiles_stow_dir }}"
+      when: stow_pending_links | length > 0
+
+    # --- Environnement shell -------------------------------------------------
+    # zsh et oh-my-zsh sont fournis par la table dotfiles_tools plus haut :
+    # Srcs/zsh/.zshrc fait `source $ZSH/oh-my-zsh.sh`, déployer le dotfile ne
+    # suffit donc pas, il faut fournir ce dont il dépend.
+    # Ne reste ici que ce qui ne rentre pas dans le modèle « une capacité,
+    # plusieurs moyens » : le shell de connexion, qui touche au compte.
 
     # Change /etc/passwd : exige un privilège. Sans lui on n'échoue pas, on
     # indique la commande à passer. Désactivable via dotfiles_set_login_shell.
     - name: Définir zsh comme shell de connexion
       ansible.builtin.user:
         name: "{{ ansible_user_id }}"
-        shell: "{{ zsh_path.stdout }}"
+        shell: "{{ dotfiles_zsh_path }}"
       become: true
       when:
         - dotfiles_set_login_shell | bool
-        - zsh_path.rc == 0
-        - ansible_user_shell != zsh_path.stdout
+        - dotfiles_zsh_path | length > 0
+        - ansible_user_shell != dotfiles_zsh_path
       ignore_errors: true
 
     # Le module `user` peut rapporter `ok` sans rien avoir fait : sur Alpine,
@@ -228,17 +472,18 @@
       register: login_shell_effective
       changed_when: false
       failed_when: false
+      check_mode: false
       when:
         - dotfiles_set_login_shell | bool
-        - zsh_path.rc == 0
+        - dotfiles_zsh_path | length > 0
 
     - name: Avertir si le shell de connexion n'a pas été appliqué
       ansible.builtin.debug:
         msg: >-
           Le shell de connexion est resté « {{ login_shell_effective.stdout }} »
-          au lieu de « {{ zsh_path.stdout }} » : privilège indisponible, ou
+          au lieu de « {{ dotfiles_zsh_path }} » : privilège indisponible, ou
           usermod absent (sur Alpine, installer le paquet `shadow`).
-          À faire toi-même : chsh -s {{ zsh_path.stdout }}
+          À faire toi-même : chsh -s {{ dotfiles_zsh_path }}
       when:
         - login_shell_effective.stdout is defined
-        - login_shell_effective.stdout != zsh_path.stdout
+        - login_shell_effective.stdout != dotfiles_zsh_path

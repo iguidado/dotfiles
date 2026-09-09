@@ -1,0 +1,57 @@
+---
+# Détection des capacités décrites par `dotfiles_tools`.
+#
+# Ce fichier est inclus PLUSIEURS fois par le playbook (avant les moyens
+# userland, après eux, puis après l'installation par paquet) : la question
+# « la capacité est-elle là ? » se repose à chaque étape, plutôt que de
+# déduire le succès du rapport du module qui vient de tourner -- rapport qui
+# ment plus souvent qu'on ne le croit (paquet installé mais binaire absent,
+# AppImage téléchargée mais inexécutable).
+#
+# Attendu de l'appelant : `dotfiles_detect_stage`, une étiquette qui rend les
+# trois passes distinguables dans la sortie.
+
+# `command -v` plutôt que `which` : intégré au shell, présent partout, y
+# compris sur les images minimales (Alpine) où `which` peut manquer.
+# ~/.local/bin est ajouté au PATH ici pour une raison purement interne : sans
+# cela, une AppImage tout juste déposée serait déclarée absente à la passe
+# suivante. Ce préfixe ne prouve RIEN sur le PATH de l'utilisateur : c'est
+# Srcs/zsh/.zshrc qui l'y met (zsh ne lit ni /etc/profile.d ni ~/.profile, d'où
+# la ligne `export PATH=$HOME/bin:$HOME/.local/bin:$PATH` en tête de ce
+# dotfile), et cela ne vaut qu'une fois le dotfile déployé et un shell rouvert.
+# C'est pourquoi le playbook recontrôle ce PATH-là (tâche « Lire le PATH d'un
+# shell de connexion ») : autrement le play se déclarerait en succès pour une
+# capacité que l'utilisateur ne peut pas appeler.
+- name: "Détecter les capacités déclarées ({{ dotfiles_detect_stage }})"
+  # `item.check | default('')` : le filtre `default` évalue son argument même
+  # quand il ne sert pas. Sans ce garde-fou, une entrée qui déclare `check_cmd`
+  # et pas `check` fait échouer le rendu du template.
+  ansible.builtin.shell: >-
+    PATH="{{ ansible_user_dir }}/.local/bin:$PATH"
+    {{ item.check_cmd | default('command -v -- ' ~ (item.check | default(''))) }}
+  loop: "{{ dotfiles_tools }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: dotfiles_detect
+  changed_when: false
+  failed_when: false
+  # Lecture seule : doit tourner AUSSI en --check, sinon les tâches suivantes
+  # travailleraient sur un registre vide de tout `rc`.
+  check_mode: false
+
+# La capacité est PROUVÉE présente, ou considérée absente : on part de la
+# liste des présents, jamais de celle des échecs. Un item sans `rc` (échec de
+# rendu, cible injoignable) tombe ainsi du bon côté -- absent -- au lieu de
+# faire exploser le filtre ou, pire, de passer pour installé.
+- name: "Réduire la détection à un état exploitable ({{ dotfiles_detect_stage }})"
+  ansible.builtin.set_fact:
+    # nom de l'outil -> chemin du binaire, pour les tâches qui ont besoin du
+    # chemin réel (le shell de connexion, par exemple).
+    dotfiles_tool_paths: "{{ dict(present | map(attribute='item.name') | zip(present | map(attribute='stdout'))) }}"
+    # Entrées complètes des capacités absentes : les moyens de les obtenir
+    # voyagent avec elles.
+    dotfiles_missing: "{{ dotfiles_tools | rejectattr('name', 'in', present | map(attribute='item.name') | list) | list }}"
+  vars:
+    present: >-
+      {{ dotfiles_detect.results
+         | selectattr('rc', 'defined') | selectattr('rc', 'equalto', 0) | list }}

@@ -1,0 +1,28 @@
+---
+# Profil « minimal » : machine de passage, compte de service, conteneur.
+# On ne garde que la capacité sans laquelle le déploiement n'a aucun sens, et
+# on laisse le shell de connexion tranquille.
+#
+# Ce fichier surcharge group_vars/all.yml en entier (pas de fusion de listes) :
+# c'est voulu, un profil décrit ce qu'il veut, pas un delta à recomposer.
+dotfiles_profile: minimal
+
+dotfiles_set_login_shell: false
+
+# Restreindre la table des capacités ne suffit pas : sans cette ligne, le play
+# stowerait quand même les 8 paquets de Srcs/, donc ~/.zshrc (qui source un
+# oh-my-zsh que ce profil n'installe plus) et les configurations nvim d'un
+# neovim absent. Le profil livrerait l'inverse de ce qu'il promet.
+# On ne garde donc que les paquets dont la configuration est autonome, plus
+# `stow` lui-même pour ~/.stow-global-ignore.
+dotfiles_stow_packages: 'stow git vim tmux gdb'
+
+dotfiles_tools:
+  - name: stow
+    check: stow
+    package: stow
+    required: true
+    hint: >-
+      stow est absent et n'a pas pu être installé : ce compte ne dispose pas du
+      privilège nécessaire. Fais installer le paquet `stow` par un
+      administrateur, ou compile-le dans ~/.local, puis relance `task install`.

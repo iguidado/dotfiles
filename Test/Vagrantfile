@@ -22,6 +22,28 @@
 # Srcs/ effectivement stowé est celui de la branche distante. Pousse tes
 # changements avant de tester une modification de dotfile ; les modifications
 # de bootstrap.sh et des playbooks, elles, sont bien prises depuis le local.
+
+# Le playbook cible `hosts: dotfiles`, pas `all`. Or l'inventaire que le
+# provisioner ansible de Vagrant génère ne range les invités dans AUCUN groupe
+# nommé : sans la déclaration ci-dessous, le play ne matcherait plus rien et
+# Vagrant rapporterait un succès (play skipped, rc=0) sans avoir rien déployé.
+# La liste doit donc suivre celle des VMs définies plus bas ; Vagrant ignore
+# les membres qui ne sont pas dans l'inventaire du moment, une VM non démarrée
+# ne pose donc pas de problème.
+VM_NAMES = ["web_ubuntu", "mini_alpine", "web_debian"]
+
+ANSIBLE_GROUPS = {
+  "dotfiles" => VM_NAMES
+}
+
+# Même raison pour le playbook privilégié : il cible désormais `hosts:
+# containers` (il tournait avant en `hosts: all`, et ne marchait donc ici que
+# par effet de bord). Sans ce groupe, `vagrant provision --provision-with
+# containers` ne matcherait plus rien et rapporterait un succès sans rien faire.
+CONTAINER_GROUPS = {
+  "containers" => VM_NAMES
+}
+
 def provision_userland(vm)
   vm.provision "file",
     source: "../bootstrap.sh",
@@ -34,6 +56,7 @@ def provision_userland(vm)
   vm.provision "dotfiles", type: "ansible" do |a|
     a.playbook = "../ansible/dotfiles.yml"
     a.compatibility_mode = "2.0"
+    a.groups = ANSIBLE_GROUPS
     a.extra_vars = { dotfiles_repo_dir: "/home/vagrant/dotfiles" }
   end
 
@@ -42,6 +65,7 @@ def provision_userland(vm)
   vm.provision "containers", type: "ansible", run: "never" do |a|
     a.playbook = "../ansible/container_base.yml"
     a.compatibility_mode = "2.0"
+    a.groups = CONTAINER_GROUPS
   end
 end
 
