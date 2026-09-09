@@ -54,7 +54,13 @@ tasks:
       - sh: test -f Vagrantfile
         msg: "Aucun Vagrantfile trouvé dans {{.VAGRANT_DIR}}"
     cmds:
-      - vagrant up --no-provision --provider=libvirt
+      # --no-parallel : libvirt démarre les cibles en parallèle par défaut, et
+      # trois invités qui bootent ensemble ont déjà fait tuer la commande par
+      # l'OOM killer de l'hôte. Les monter l'une après l'autre lisse le pic.
+      # Attention, ça ne borne PAS la mémoire totale : elles restent toutes
+      # allumées à la fin. Pour un cycle complet à empreinte constante, voir
+      # `task test`.
+      - vagrant up --no-provision --provider=libvirt --no-parallel
 
   test-provision:
     desc: "Provision test environment"
@@ -62,6 +68,48 @@ tasks:
     deps: [test-up]
     cmds:
       - vagrant provision
+
+  # Cycle complet à empreinte mémoire CONSTANTE : chaque cible est créée,
+  # provisionnée, puis ÉTEINTE avant de passer à la suivante. C'est la seule
+  # forme qui borne réellement la consommation -- `--no-parallel` étale le pic
+  # de démarrage mais laisse les trois invités allumés à l'arrivée, ce qui a
+  # suffi à faire tuer la commande sur une machine de 16 Go.
+  #
+  # Une cible en échec n'interrompt pas les suivantes : on veut le tableau
+  # complet en une passe. Le compte-rendu final donne le verdict par cible, et
+  # la tâche sort en échec s'il en reste au moins une.
+  #   task test VMS=web_debian        # une seule cible
+  test:
+    desc: "Cycle de test complet, une VM à la fois (créée, provisionnée, éteinte)"
+    dir: "{{.VAGRANT_DIR}}"
+    vars:
+      VMS: '{{.VMS | default "web_debian web_ubuntu mini_alpine"}}'
+    preconditions:
+      - sh: command -v vagrant
+        msg: "Vagrant n'est pas installé"
+    cmds:
+      - cmd: |
+          echouees=""
+          for vm in {{.VMS}}; do
+            echo "=================== $vm ==================="
+            if vagrant up "$vm" --provider=libvirt; then
+              echo "--- $vm : OK"
+            else
+              echo "--- $vm : ÉCHEC"
+              echouees="$echouees $vm"
+            fi
+            # Éteindre, pas détruire : l'invité reste inspectable
+            # (vagrant up "$vm" puis vagrant ssh "$vm"), et la mémoire est
+            # rendue avant la cible suivante.
+            vagrant halt -f "$vm" >/dev/null 2>&1 || true
+          done
+          echo
+          if [ -n "$echouees" ]; then
+            echo "Cibles en échec :$echouees"
+            echo "Pour investiguer : vagrant up <cible> && vagrant ssh <cible>"
+            exit 1
+          fi
+          echo "Toutes les cibles ont abouti."
 
   test-clean:
     desc: "Clean environment"

@@ -77,6 +77,17 @@ Vagrant.configure("2") do |config|
   # Disabling synced folder since it is not needed for tests
   config.vm.synced_folder ".", "/vagrant", disabled: true
 
+  # Plafond de ressources explicite. Sans lui, chaque box `generic/*` applique
+  # SA propre valeur (jusqu'à 2 Go), et démarrer les trois cibles d'un coup a
+  # déjà fait tuer un `vagrant up` par manque de mémoire sur l'hôte. 1,5 Go
+  # suffit largement : ces invités ne font qu'un apt, un clone et un playbook.
+  # C'est la moitié du problème -- l'autre moitié est de ne pas les garder
+  # allumées en même temps, d'où `task test` qui les éteint au fur et à mesure.
+  config.vm.provider :libvirt do |lv|
+    lv.memory = 1536
+    lv.cpus = 2
+  end
+
   # Every Vagrant development environment requires a box. You can search for
   # boxes at https://vagrantcloud.com/search.
   config.vm.define "web_ubuntu" do |ubuntu|
