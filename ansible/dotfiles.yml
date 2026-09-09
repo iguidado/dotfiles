@@ -29,6 +29,11 @@
     dotfiles_backup_conflicts: true
     dotfiles_backup_dir: "{{ ansible_user_dir }}/.dotfiles-backup/{{ ansible_date_time.iso8601_basic_short }}"
 
+    # Déballage des AppImages qui ne peuvent pas se monter. Hors de
+    # ~/.local/bin, qui ne doit contenir que des commandes : un squashfs-root
+    # au milieu du PATH n'a rien à y faire.
+    dotfiles_appimage_dir: "{{ ansible_user_dir }}/.local/share/dotfiles/appimages"
+
     # Chemin réel du zsh constaté par le moteur de capacités, vide s'il reste
     # introuvable. Une var de play est évaluée au moment de son usage : elle
     # peut donc s'appuyer sur un fait produit plus tard dans le play.
@@ -170,25 +175,110 @@
       failed_when: false
       check_mode: false
 
-    - name: Avertir des AppImages qui ne démarrent pas
+    # On repart des ENTRÉES d'outil, pas des résultats de la boucle : la suite
+    # manipule alors `item.name` / `item.dest` au lieu d'empiler les `item.item`.
+    - name: Recenser les AppImages qui ne démarrent pas
+      ansible.builtin.set_fact:
+        dotfiles_appimage_broken: >-
+          {{ dotfiles_appimage_smoke.results | default([])
+             | selectattr('rc', 'defined') | rejectattr('rc', 'equalto', 0)
+             | map(attribute='item') | list }}
+
+    # Repli sans privilège : le runtime d'une AppImage sait se déballer tout
+    # seul avec --appimage-extract, sans FUSE et sans montage.
+    #
+    # On ne cherche PAS à identifier la cause avant d'essayer. Lire le message
+    # d'erreur pour distinguer « FUSE absent » de « mauvaise libc » serait un
+    # test sur chaîne, donc la même fragilité que la détection 'LINK' qu'on
+    # vient de retirer. L'extraction est son propre diagnostic : elle aboutit
+    # si le binaire peut s'exécuter (seul FUSE manquait), et échoue d'elle-même
+    # sur une libc ou une architecture incompatibles -- cas que l'avertissement
+    # final couvre toujours.
+    - name: Préparer les répertoires de déballage
+      ansible.builtin.file:
+        path: "{{ dotfiles_appimage_dir }}/{{ item.name }}"
+        state: directory
+      loop: "{{ dotfiles_appimage_broken }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Déballer les AppImages qui ne démarrent pas
+      ansible.builtin.command:
+        cmd: "{{ item.dest }} --appimage-extract"
+        chdir: "{{ dotfiles_appimage_dir }}/{{ item.name }}"
+        creates: "{{ dotfiles_appimage_dir }}/{{ item.name }}/squashfs-root/AppRun"
+      loop: "{{ dotfiles_appimage_broken }}"
+      loop_control:
+        label: "{{ item.name }}"
+      failed_when: false
+      check_mode: false
+
+    # Le succès se CONSTATE sur le disque plutôt que dans le rapport de la
+    # tâche : une extraction sautée par `creates` (déjà faite au passage
+    # précédent) n'a pas de rc, et se fier au rc la ferait passer pour un échec.
+    - name: Constater les déballages exploitables
+      ansible.builtin.stat:
+        path: "{{ dotfiles_appimage_dir }}/{{ item.name }}/squashfs-root/AppRun"
+      loop: "{{ dotfiles_appimage_broken }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: dotfiles_appimage_apprun
+      check_mode: false
+
+    # L'AppImage d'origine est rangée à côté de son déballage : `dest` doit être
+    # libéré pour devenir le lien, et la conserver permet de rejouer une
+    # extraction sans retélécharger. `get_url` ne retéléchargera pas non plus au
+    # passage suivant : il ne télécharge que si `dest` n'existe pas, et un lien
+    # valide existe.
+    - name: Ranger l'AppImage d'origine à côté de son déballage
+      ansible.builtin.command:
+        cmd: >-
+          mv -- {{ item.item.dest }}
+          {{ dotfiles_appimage_dir }}/{{ item.item.name }}/{{ item.item.name }}.appimage
+        removes: "{{ item.item.dest }}"
+        creates: "{{ dotfiles_appimage_dir }}/{{ item.item.name }}/{{ item.item.name }}.appimage"
+      loop: "{{ dotfiles_appimage_apprun.results | default([]) | selectattr('stat.exists') | list }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Pointer la commande sur le déballage
+      ansible.builtin.file:
+        src: "{{ dotfiles_appimage_dir }}/{{ item.item.name }}/squashfs-root/AppRun"
+        dest: "{{ item.item.dest }}"
+        state: link
+      loop: "{{ dotfiles_appimage_apprun.results | default([]) | selectattr('stat.exists') | list }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    # Preuve, pas supposition : le déballage n'a de valeur que si la commande
+    # démarre vraiment maintenant.
+    - name: Revérifier le démarrage après déballage
+      ansible.builtin.command:
+        cmd: "{{ item.dest }} --version"
+      loop: "{{ dotfiles_appimage_broken }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: dotfiles_appimage_resmoke
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Avertir des AppImages qui ne démarrent toujours pas
       ansible.builtin.debug:
         msg: >-
-          {{ item.item.name }} est installé mais ne démarre pas. Trois causes,
-          à trancher avec `{{ item.item.dest }} --version` :
-          FUSE absent (paquet `fuse` ou `fuse2`) -- repli sans privilège :
-          cd ~/.local/bin && ./{{ item.item.dest | basename }} --appimage-extract
-          puis pointer {{ item.item.dest }} sur squashfs-root/AppRun ;
-          libc incompatible (l'AppImage est liée à la glibc, elle ne peut pas
-          tourner sur une musl comme Alpine) ou architecture différente --
-          dans ces deux cas l'extraction ne changera rien : supprime
-          {{ item.item.dest }}, sinon il masquera dans ton PATH le paquet
-          système que le playbook peut installer à sa place.
+          {{ item.item.name }} est installé et le déballage automatique
+          (--appimage-extract, le repli quand FUSE manque) n'a pas suffi :
+          la commande ne démarre toujours pas. Il reste deux causes, et
+          l'extraction n'y changera rien -- libc incompatible (l'AppImage est
+          liée à la glibc, elle ne peut pas tourner sur une musl comme Alpine)
+          ou architecture différente. À faire : supprime {{ item.item.dest }},
+          sinon il masquera dans ton PATH le paquet système que le playbook
+          peut installer à sa place.
       loop: >-
-        {{ dotfiles_appimage_smoke.results
+        {{ dotfiles_appimage_resmoke.results | default([])
            | selectattr('rc', 'defined') | rejectattr('rc', 'equalto', 0) | list }}
       loop_control:
         label: "{{ item.item.name }}"
-      when: dotfiles_appimage_smoke.results is defined
 
     # Une capacité « présente » ne l'est que pour Ansible tant qu'on n'a pas
     # vérifié le PATH de l'utilisateur : detect_tools.yml préfixe LUI-MÊME
