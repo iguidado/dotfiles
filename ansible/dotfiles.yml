@@ -9,6 +9,10 @@
     dotfiles_repo_dir: "{{ playbook_dir | dirname }}"
     dotfiles_stow_dir: "{{ dotfiles_repo_dir }}/Srcs"
 
+    # Changer le shell de connexion touche /etc/passwd. C'est la seule action
+    # de ce playbook qui modifie le compte lui-même : elle reste débrayable.
+    dotfiles_set_login_shell: true
+
   tasks:
     # Ce playbook configure un espace UTILISATEUR : une fois stow présent, plus
     # aucune tâche n'exige de privilège. L'élévation n'est donc tentée que dans
@@ -72,3 +76,75 @@
     - name: check result
       ansible.builtin.debug:
         var: result
+
+    # --- Environnement shell -------------------------------------------------
+    # Srcs/zsh/.zshrc fait `source $ZSH/oh-my-zsh.sh` : sans oh-my-zsh, chaque
+    # ouverture de shell échoue sur une machine fraîche. Déployer le dotfile ne
+    # suffit donc pas, il faut fournir ce dont il dépend.
+    #
+    # Même règle que pour stow : le privilège n'est sollicité que là où il est
+    # indispensable (le paquet zsh, le shell de connexion). Le clone
+    # d'oh-my-zsh, lui, est du userland pur.
+
+    - name: Vérifier si zsh est déjà disponible
+      ansible.builtin.shell: command -v zsh
+      register: zsh_binary
+      changed_when: false
+      failed_when: false
+
+    - name: install zsh
+      ansible.builtin.package:
+        name: zsh
+        state: present
+      become: true
+      when: zsh_binary.rc != 0
+      register: zsh_install
+      ignore_errors: true
+
+    # Le chemin doit être relu : s'il vient d'être installé, la détection
+    # initiale n'a rien capturé.
+    - name: Localiser zsh
+      ansible.builtin.shell: command -v zsh
+      register: zsh_path
+      changed_when: false
+      failed_when: false
+
+    - name: Avertir si zsh reste indisponible
+      ansible.builtin.debug:
+        msg: >-
+          zsh est absent et n'a pas pu être installé : ce compte ne dispose pas
+          du privilège nécessaire. Les dotfiles sont déployés, mais le shell de
+          connexion restera inchangé tant qu'un administrateur n'aura pas
+          installé le paquet `zsh`.
+      when: zsh_path.rc != 0
+
+    # oh-my-zsh vit dans le HOME : aucun privilège. `update: false` garde la
+    # tâche idempotente et ne réécrit pas un clone existant à chaque exécution.
+    - name: Installer oh-my-zsh
+      ansible.builtin.git:
+        repo: https://github.com/ohmyzsh/ohmyzsh.git
+        dest: "{{ ansible_user_dir }}/.oh-my-zsh"
+        depth: 1
+        version: master
+        update: false
+
+    # Change /etc/passwd : exige un privilège. Sans lui on n'échoue pas, on
+    # indique la commande à passer. Désactivable via dotfiles_set_login_shell.
+    - name: Définir zsh comme shell de connexion
+      ansible.builtin.user:
+        name: "{{ ansible_user_id }}"
+        shell: "{{ zsh_path.stdout }}"
+      become: true
+      when:
+        - dotfiles_set_login_shell | bool
+        - zsh_path.rc == 0
+        - ansible_user_shell != zsh_path.stdout
+      register: login_shell
+      ignore_errors: true
+
+    - name: Avertir si le shell de connexion n'a pas pu être changé
+      ansible.builtin.debug:
+        msg: >-
+          Le shell de connexion n'a pas pu être modifié faute de privilège.
+          À faire toi-même une fois zsh disponible : chsh -s {{ zsh_path.stdout }}
+      when: login_shell is failed
