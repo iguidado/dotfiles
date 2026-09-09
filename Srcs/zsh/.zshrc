@@ -115,4 +115,8 @@ alias lazyvim='NVIM_APPNAME="nvim-lazyvim" nvim'
 alias doc="docker"
 alias dc="docker compose"
 
-. "$HOME/.local/bin/env"
+# Déposé par les installateurs uv / rustup : absent d'une machine neuve, où le
+# source inconditionnel faisait échouer chaque ouverture de shell.
+if [ -f "$HOME/.local/bin/env" ]; then
+    . "$HOME/.local/bin/env"
+fi

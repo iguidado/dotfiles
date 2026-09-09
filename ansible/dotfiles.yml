@@ -139,12 +139,28 @@
         - dotfiles_set_login_shell | bool
         - zsh_path.rc == 0
         - ansible_user_shell != zsh_path.stdout
-      register: login_shell
       ignore_errors: true
 
-    - name: Avertir si le shell de connexion n'a pas pu être changé
+    # Le module `user` peut rapporter `ok` sans rien avoir fait : sur Alpine,
+    # usermod appartient au paquet `shadow`, absent par défaut, et le
+    # changement est alors silencieusement perdu. On relit donc /etc/passwd
+    # plutôt que de croire le rapport de la tâche.
+    - name: Relire le shell de connexion effectif
+      ansible.builtin.shell: "getent passwd {{ ansible_user_id }} | cut -d: -f7"
+      register: login_shell_effective
+      changed_when: false
+      failed_when: false
+      when:
+        - dotfiles_set_login_shell | bool
+        - zsh_path.rc == 0
+
+    - name: Avertir si le shell de connexion n'a pas été appliqué
       ansible.builtin.debug:
         msg: >-
-          Le shell de connexion n'a pas pu être modifié faute de privilège.
-          À faire toi-même une fois zsh disponible : chsh -s {{ zsh_path.stdout }}
-      when: login_shell is failed
+          Le shell de connexion est resté « {{ login_shell_effective.stdout }} »
+          au lieu de « {{ zsh_path.stdout }} » : privilège indisponible, ou
+          usermod absent (sur Alpine, installer le paquet `shadow`).
+          À faire toi-même : chsh -s {{ zsh_path.stdout }}
+      when:
+        - login_shell_effective.stdout is defined
+        - login_shell_effective.stdout != zsh_path.stdout
