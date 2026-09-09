@@ -105,3 +105,14 @@ source $ZSH/oh-my-zsh.sh
 alias obsidian="flatpak run md.obsidian.Obsidian"
 export VAGRANT_DEFAULT_PROVIDER=libvirt
 export WORKSPACE=~/PEOS/Workspace
+alias ob-init='mkdir -p .obsidian'
+alias ob='xdg-open "obsidian://open?path=$(pwd)"'
+
+alias vim='nvim'
+
+alias lazyvim='NVIM_APPNAME="nvim-lazyvim" nvim'
+
+alias doc="docker"
+alias dc="docker compose"
+
+. "$HOME/.local/bin/env"

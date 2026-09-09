@@ -1,0 +1,11 @@
+[user]
+	email = noob.3vol@gmail.com
+
+[core]
+	editor = vim
+
+[init]
+	defaultBranch = main
+
+[pull]
+	rebase = true
