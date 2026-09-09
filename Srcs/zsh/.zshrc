@@ -1,5 +1,14 @@
 # If you come from bash you might have to change your $PATH.
-# export PATH=$HOME/bin:$HOME/.local/bin:/usr/local/bin:$PATH
+# ~/.local/bin est la destination des moyens userland du playbook (AppImage
+# neovim, scripts personnels) : c'est le seul emplacement installable sans
+# privilège. La ligne ci-dessous n'est donc pas décorative, elle est la
+# contrepartie de ces installations.
+# Elle doit rester avant `source $ZSH/oh-my-zsh.sh` : zsh ne lit ni
+# /etc/profile.d ni ~/.profile -- or c'est ~/.profile qui ajoute ~/.local/bin
+# au PATH sur Debian/Ubuntu. Comme le playbook impose zsh comme shell de
+# connexion, sans cette ligne `nvim` (et l'alias vim qui en dépend) resterait
+# introuvable alors que le binaire est bel et bien installé.
+export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
 
 # Path to your Oh My Zsh installation.
 export ZSH="$HOME/.oh-my-zsh"

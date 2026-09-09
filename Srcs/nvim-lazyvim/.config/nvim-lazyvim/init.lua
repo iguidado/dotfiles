@@ -1,0 +1,33 @@
+-- bootstrap lazy.nvim, LazyVim and your plugins
+require("config.lazy")
+
+-- Configuration LazyVim déployée par stow dans ~/.config/nvim-lazyvim, ouverte
+-- par `alias lazyvim` (NVIM_APPNAME) défini dans Srcs/zsh/.zshrc.
+--
+-- DEUX PIÈGES PROPRES À CE PAQUET (voir aussi docs/stow.md § 2.2) :
+--
+-- 1. L'ÉTAT D'EXÉCUTION N'EST PAS VERSIONNÉ, C'EST UN CHOIX.
+--    lazy-lock.json et lazyvim.json sont ÉCRITS par :Lazy update, :Lazy sync
+--    et :LazyExtras. Stowés, ils deviendraient des liens vers le dépôt
+--    dotfiles : chaque mise à jour de plugin écrirait À TRAVERS le lien et
+--    salirait le dépôt sans que l'utilisateur ait touché à ses dotfiles. Le
+--    dépôt amont (LazyVim/starter) ne les suit pas non plus. Ils restent donc
+--    des fichiers RÉELS de ~/.config/nvim-lazyvim, hors du paquet.
+--    Contrepartie assumée : pas de verrou de versions reproductible d'une
+--    machine à l'autre. Pour en vouloir un, il faut le rajouter ici
+--    SCIEMMENT et accepter le dépôt sali à chaque mise à jour de plugin.
+--
+-- 2. CE RÉPERTOIRE N'ACCEPTE PAS DE CLONE GIT CONCURRENT.
+--    Si ~/.config/nvim-lazyvim vient d'un `git clone` de LazyVim/starter, son
+--    .git SURVIT au déploiement : stow l'ignore (règle `\.git` de
+--    ~/.stow-global-ignore), il n'est donc ni copié ni écarté, alors que les
+--    fichiers suivis par ce clone sont devenus des liens vers le dépôt
+--    dotfiles. git les rapporte en `typechange`, et surtout un `git checkout
+--    .`, `git restore .`, `git pull` ou `git stash` lancé dans ce répertoire
+--    REMPLACE silencieusement les liens par des fichiers réels : le
+--    déploiement est défait sans aucun signal, et la prochaine exécution du
+--    playbook les traitera comme des conflits à écarter en sauvegarde.
+--    À faire UNE FOIS, avant le premier déploiement :
+--      mv ~/.config/nvim-lazyvim ~/.config/nvim-lazyvim.upstream
+--    (à défaut, retirer le seul ~/.config/nvim-lazyvim/.git). Le paquet prend
+--    le contrôle du répertoire ; il ne cohabite pas avec un clone amont.
