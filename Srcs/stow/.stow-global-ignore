@@ -1,0 +1,51 @@
+# ~/.stow-global-ignore — deployed by the `stow` package of this repo.
+#
+# Stow only reads ignore lists from two places: `.stow-local-ignore` at the top
+# level of an individual package, or this file in $HOME. A `.stow-local-ignore`
+# placed in the stow directory itself (e.g. Srcs/) is silently ignored.
+#
+# WARNING: defining this file REPLACES stow's built-in default ignore list,
+# so the useful defaults are reproduced below.
+#
+# Patterns are anchored Perl regexes matched against each path segment
+# (the basename), unless the pattern contains a "/", in which case it matches
+# the path relative to the package root.
+
+# --- Secrets: never symlink these into $HOME ---
+.*\.key
+.*\.pem
+.*\.token
+.*\.gpg
+.*_rsa
+.*_dsa
+.*_ecdsa
+.*_ed25519
+\.env
+\.envrc
+\.netrc
+
+# --- Editor and temporary noise ---
+.*\.swp
+.*\.swo
+.*~
+.*\.bak
+\#.*\#
+\.DS_Store
+
+# --- VCS (reproduced from stow's built-in defaults) ---
+\.git
+\.gitignore
+\.gitmodules
+\.hg
+\.svn
+_darcs
+CVS
+\.cvsignore
+RCS
+.+,v
+\.\#.+
+
+# --- Repo-level files that should never land in $HOME ---
+^/README.*
+^/LICENSE.*
+^/COPYING
