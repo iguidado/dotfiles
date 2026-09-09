@@ -9,6 +9,11 @@ Le principe qui gouverne tout le reste : **le privilège est une capacité
 détectée, jamais un prérequis**. Un compte sans `sudo` doit aboutir à un
 environnement fonctionnel, pas à un abandon.
 
+> **Tu reprends le dépôt après une pause ?** Lis
+> [`docs/reprise.md`](docs/reprise.md) d'abord : état vérifié, commandes de
+> contrôle, et le piège à connaître avant de relancer un déploiement.
+> Ce README explique comment le projet s'utilise ; celui-là, où il en est.
+
 ---
 
 ## 1. Le contrat structurel : `Srcs/`
