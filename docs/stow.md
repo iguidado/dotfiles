@@ -297,6 +297,12 @@ Ne pas créer un package `all` contenant tout — ça annule l'intérêt de la g
 - `.ssh/known_hosts` (empreintes machine, informations réseau)
 - `.gitconfig` si il contient un token PAT ou une identité réelle
 
+**Ne jamais stower l'ÉTAT D'EXÉCUTION d'un programme.** Un fichier que l'application RÉÉCRIT elle-même (verrou de versions, marqueurs de news, caches, historiques) devient, une fois stowé, un lien vers le dépôt : le programme écrit à travers le lien et salit le dépôt de dotfiles sans que l'utilisateur y ait touché. Cas concret dans ce dépôt — `lazy-lock.json` et `lazyvim.json` sont volontairement ABSENTS du paquet `nvim-lazyvim` : `:Lazy update`, `:Lazy sync` et `:LazyExtras` les réécrivent. Ils restent des fichiers réels de `~/.config/nvim-lazyvim`. Contrepartie assumée : pas de verrou de versions reproductible entre machines.
+
+**Ne pas recopier les fichiers de projet amont dans un package.** `README.md`, `LICENSE`, `COPYING` d'une configuration récupérée en amont finiraient déposés en lien dans `$HOME`. Les règles `^/README.*` et `^/LICENSE.*` de `Srcs/stow/.stow-global-ignore` ne les protègent PAS à cette profondeur : un motif contenant `/` est ancré sur la RACINE DU PACKAGE, il couvre `mon-paquet/LICENSE`, pas `mon-paquet/.config/appli/LICENSE`. La bonne réponse est de ne pas les commiter — surtout pas un `.stow-local-ignore` dans le package, qui REMPLACERAIT la liste globale (secrets et VCS compris) au lieu de s'y ajouter.
+
+**Un package ne cohabite pas avec un clone git au même endroit.** Si le répertoire cible est lui-même un dépôt git (une configuration clonée depuis l'amont, par exemple `~/.config/nvim-lazyvim` cloné de LazyVim/starter), son `.git` survit au déploiement : stow l'ignore via la règle `\.git`, il n'est donc ni remplacé ni écarté, alors que les fichiers suivis, eux, sont devenus des liens vers le dépôt dotfiles. `git status` les rapporte en `typechange`, et un `git checkout .`, `git restore .`, `git pull` ou `git stash` lancé là REMPLACE silencieusement les liens par des fichiers réels : le déploiement est défait sans aucun signal, et la prochaine exécution du playbook traitera ces fichiers comme des conflits à écarter en sauvegarde. Avant le premier déploiement : `mv ~/.config/<appli> ~/.config/<appli>.upstream`, ou au minimum retirer le `.git`.
+
 ---
 
 ## 3. Usage direct de Stow
