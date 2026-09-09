@@ -1,25 +1,70 @@
 - name: install dotfiles with Stow
   hosts: all
+
+  vars:
+    # Racine du dépôt déduite de l'emplacement de ce playbook : une exécution
+    # locale ne peut donc plus stower un autre clone que le sien.
+    # `playbook_dir` est un chemin du CONTRÔLEUR -- pour une cible distante,
+    # surcharger : -e dotfiles_repo_dir=/home/vagrant/dotfiles
+    dotfiles_repo_dir: "{{ playbook_dir | dirname }}"
+    dotfiles_stow_dir: "{{ dotfiles_repo_dir }}/Srcs"
+
   tasks:
+    # Ce playbook configure un espace UTILISATEUR : une fois stow présent, plus
+    # aucune tâche n'exige de privilège. L'élévation n'est donc tentée que dans
+    # le seul cas qui l'impose -- stow absent -- et son échec n'est pas fatal
+    # en lui-même : il est traduit en message actionnable. Un compte sans sudo
+    # reste utilisable dès lors que stow est fourni par l'administrateur.
+    - name: Vérifier si stow est déjà disponible
+      ansible.builtin.shell: command -v stow
+      register: stow_binary
+      changed_when: false
+      failed_when: false
+
+    # `package` choisit apt/apk/dnf selon la cible : Alpine n'échoue plus faute
+    # de branche dédiée.
     - name: install stow
-      ansible.builtin.apt:
+      ansible.builtin.package:
         name: stow
         state: present
       become: true
+      when: stow_binary.rc != 0
+      register: stow_install
+      ignore_errors: true
 
+    - name: Arrêt explicite si stow reste indisponible
+      ansible.builtin.fail:
+        msg: >-
+          stow est absent et n'a pas pu être installé : ce compte ne dispose
+          pas du privilège nécessaire. Fais installer le paquet `stow` par un
+          administrateur, ou compile-le dans ~/.local, puis relance
+          `task install`.
+      when:
+        - stow_binary.rc != 0
+        - stow_install is failed
+
+    # ~/.stow-global-ignore carries the secret-exclusion rules, but stow reads
+    # it at startup. It must therefore be in place BEFORE any other package is
+    # stowed -- otherwise the very first run on a fresh machine links secrets
+    # anyway. `creates` keeps this idempotent without a simulation pass.
+    - name: Bootstrap the global ignore file before anything else
+      ansible.builtin.shell: "stow --no-folding stow -t ~"
+      args:
+        chdir: "{{ dotfiles_stow_dir }}"
+        creates: "{{ ansible_user_dir }}/.stow-global-ignore"
 
     - name: Simulate Stow Execution
       ansible.builtin.shell: "stow --no-folding --simulate --verbose=2 * -t ~"
       args:
-        chdir: "{{ ansible_user_dir }}/dotfiles/Srcs"
+        chdir: "{{ dotfiles_stow_dir }}"
       register: stow_simulation
       # Disable tracking of change, this command is never considered as impacting system
-      changed_when: false 
+      changed_when: false
 
     - name: Appliquer Stow (uniquement si des changements ont été détectés)
       ansible.builtin.shell: "stow --no-folding * -t ~"
       args:
-        chdir: "{{ ansible_user_dir }}/dotfiles/Srcs"
+        chdir: "{{ dotfiles_stow_dir }}"
       # This task is only executed when simulation return contain the word 'LINK'
       when: "'LINK' in stow_simulation.stderr or 'LINK' in stow_simulation.stdout"
       register: result
