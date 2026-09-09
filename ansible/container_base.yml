@@ -37,7 +37,9 @@
     container_runtime: podman
 
     # Plage d'UID/GID délégués au compte pour le rootless. 65536 est la taille
-    # conventionnelle (un /16), suffisante pour tout usage normal.
+    # conventionnelle (un /16), suffisante pour tout usage normal, et 100000 la
+    # première base conventionnelle.
+    container_subid_base: 100000
     container_subid_count: 65536
 
   tasks:
@@ -65,33 +67,43 @@
       when: container_runtime == 'podman'
 
     # Le rootless repose sur des UID/GID subordonnés délégués au compte. Sans
-    # entrée dans /etc/subuid et /etc/subgid, podman démarre puis échoue à la
-    # première image. Les distributions ne les créent pas toujours.
-    - name: Lire les plages d'UID subordonnés du compte
-      ansible.builtin.command:
-        cmd: "grep -c '^{{ ansible_user_id }}:' /etc/subuid /etc/subgid"
+    # entrée dans /etc/subuid et /etc/subgid, podman démarre, `podman info`
+    # répond, et la PREMIÈRE image échoue :
+    #   insufficient UIDs or GIDs available in user namespace
+    #
+    # On écrit ces fichiers directement plutôt que par `usermod --add-subuids`.
+    # Constaté sur Alpine : usermod appartient au paquet `shadow` (absent par
+    # défaut, busybox ne le fournit pas), la commande échouait donc en silence
+    # et podman passait pour prêt. lineinfile ne dépend d'aucun paquet.
+    #
+    # RÉSERVE : la plage 100000-165535 est la première plage conventionnelle.
+    # Sur une machine multi-utilisateurs où un autre compte l'occupe déjà, il
+    # faut décaler `container_subid_base` -- des plages qui se recouvrent
+    # laisseraient deux comptes écrire sur les mêmes UID.
+    - name: Déléguer des UID/GID subordonnés au compte
+      ansible.builtin.lineinfile:
+        path: "/etc/{{ item }}"
+        regexp: "^{{ ansible_user_id }}:"
+        line: "{{ ansible_user_id }}:{{ container_subid_base }}:{{ container_subid_count }}"
+        create: true
+        mode: "0644"
+      become: true
+      loop: [subuid, subgid]
       register: container_subid
-      changed_when: false
-      failed_when: false
-      check_mode: false
       when: container_runtime == 'podman'
 
-    # usermod --add-subuids appartient au paquet `shadow` : présent d'office
-    # sur Debian, absent d'Alpine par défaut (busybox). L'échec n'est pas
-    # fatal, il est traduit plus bas en message actionnable.
-    - name: Déléguer des UID/GID subordonnés au compte
+    # Podman mémorise la configuration de son espace de noms au premier usage :
+    # changer les plages après coup exige cette remise à plat, faute de quoi il
+    # continue d'appliquer l'ancienne (c'est ce que son propre message d'erreur
+    # recommande).
+    - name: Réinitialiser l'espace de noms podman après changement de plages
       ansible.builtin.command:
-        cmd: >-
-          usermod
-          --add-subuids 100000-{{ 100000 + container_subid_count - 1 }}
-          --add-subgids 100000-{{ 100000 + container_subid_count - 1 }}
-          {{ ansible_user_id }}
-      become: true
+        cmd: podman system migrate
+      become: false
       when:
         - container_runtime == 'podman'
-        - container_subid.stdout is defined
-        - "'0' in container_subid.stdout_lines | default([])"
-      register: container_subid_added
+        - container_subid is changed
+      changed_when: true
       failed_when: false
 
     # ------------------------------------------------------------------ docker
@@ -237,12 +249,50 @@
       failed_when: false
       check_mode: false
 
+    # `podman info` NE SUFFIT PAS -- constaté sur Alpine : il répondait rc=0
+    # alors que le premier `podman run` échouait faute de plages subordonnées.
+    # Une commande qui interroge sa propre configuration ne prouve rien sur la
+    # capacité à exécuter. On relit donc l'état réel des deux fichiers, la
+    # seule chose dont dépend le rootless.
+    - name: Relire les plages subordonnées effectivement en place
+      ansible.builtin.command:
+        cmd: "grep -c '^{{ ansible_user_id }}:' /etc/subuid /etc/subgid"
+      become: false
+      register: container_subid_effective
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: container_runtime == 'podman'
+
+    - name: Arrêt si le rootless n'est pas réellement praticable
+      ansible.builtin.fail:
+        msg: >-
+          podman est installé et répond, mais {{ ansible_user_id }} n'a pas de
+          plages d'UID/GID subordonnées dans /etc/subuid et /etc/subgid : le
+          premier `podman run` échouerait sur « insufficient UIDs or GIDs
+          available in user namespace ». L'écriture de ces plages demande un
+          privilège. À faire toi-même :
+          echo '{{ ansible_user_id }}:{{ container_subid_base }}:{{ container_subid_count }}'
+          | sudo tee -a /etc/subuid /etc/subgid && podman system migrate
+      when:
+        - container_runtime == 'podman'
+        - container_smoke.rc == 0
+        - "'0' in container_subid_effective.stdout_lines | default([])"
+
     - name: Bilan du runtime de conteneurs
       ansible.builtin.debug:
         msg: >-
           {{
-            container_runtime ~ ' répond au compte ' ~ ansible_user_id ~
-            ' sans privilège : le runtime est utilisable.'
+            container_runtime ~ ' est installé et répond au compte ' ~
+            ansible_user_id ~ ' sans privilège' ~ (
+              ', avec ses plages d UID subordonnées en place.'
+              if container_runtime == 'podman' else '.'
+            ) ~ ' Ce playbook ne va pas plus loin : la preuve définitive est
+            d exécuter un conteneur (' ~ container_runtime ~ ' run), ce qui
+            suppose un accès au registre et un noyau correctement équipé --
+            cgroup v2 et /dev/net/tun pour le rootless, absents par exemple du
+            noyau de la VM Alpine de Test/. À vérifier une fois sur la cible :
+            ' ~ container_runtime ~ ' run --rm docker.io/library/alpine echo ok'
             if container_smoke.rc == 0
             else
             container_runtime ~ ' est installé mais ne répond pas encore à ' ~
