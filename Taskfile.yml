@@ -4,6 +4,12 @@ version: '3'
 
 vars:
   VAGRANT_DIR: "./Test"
+  # Sudo flag for ansible-playbook. Deploying dotfiles is a userland operation
+  # and needs no privilege: the only task that does is installing stow itself,
+  # and it is skipped when stow is already present. Default is therefore no
+  # elevation at all. On a machine where stow is missing AND you do have sudo:
+  #   task install BECOME_FLAG=-K
+  BECOME_FLAG: ""
 
 tasks:
 
@@ -42,6 +48,21 @@ tasks:
       - vagrant destroy -f
 
   install:
-    desc: "Install dotfiles on current system"
+    desc: "Install dotfiles on current system (deploy: repo -> $HOME)"
+    interactive: true
     cmds:
-      - ansible-playbook ./ansible/dotfiles.yml -i ./ansible/inventory.ini
+      - ansible-playbook ./ansible/dotfiles.yml -i ./ansible/inventory.ini {{.BECOME_FLAG}}
+
+  status:
+    desc: "Show what is not yet backed up"
+    cmds:
+      - git status --short --branch
+
+  save:
+    desc: "Backup current dotfiles to the git remote (capture: $HOME -> repo -> origin)"
+    vars:
+      MESSAGE: '{{.MESSAGE | default "chore: backup dotfiles"}}'
+    cmds:
+      - git add -A
+      - git diff --cached --quiet && echo "Nothing to back up, already up to date." || git commit -m "{{.MESSAGE}}"
+      - git push
