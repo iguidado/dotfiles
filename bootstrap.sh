@@ -1,12 +1,43 @@
 #!/bin/sh
+#
+# Bootstrap d'un espace utilisateur.
+#
+# PRINCIPE : le privilège est une CAPACITÉ DÉTECTÉE, jamais un prérequis.
+# Le script constate ce dont le compte dispose, tente la configuration système
+# lorsque l'élévation est possible, puis compose avec ce qu'il a effectivement
+# obtenu pour réunir les capacités nécessaires (ansible ici, stow côté
+# playbook). Un compte sans sudo doit aboutir à un environnement fonctionnel,
+# pas à un abandon.
+#
+# Variables d'environnement :
+#   DEBUG=1         active la trace d'exécution
+#   DOTFILES_DIR    emplacement du dépôt        (défaut : ~/dotfiles)
+#   DOTFILES_REPO   URL de clonage
 
-set -x
+set -eu
+
+if [ "${DEBUG:-0}" = "1" ]; then
+    set -x
+fi
+
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/dotfiles}"
+DOTFILES_REPO="${DOTFILES_REPO:-https://github.com/iguidado/dotfiles.git}"
+ANSIBLE_VENV="$HOME/.local/share/dotfiles/venv"
+
+# Préfixe d'élévation, déterminé par detect_privilege.
+# Vide = mode userland strict.
+SUDO=""
+
+log() { echo "==> $*"; }
+warn() { echo "/!\\ $*" >&2; }
+die() {
+    echo "XX  $*" >&2
+    exit 1
+}
 
 check_root() {
     if [ "$(id -u)" -eq 0 ]; then
-        echo "❌ Erreur : Ce script ne doit pas être exécuté en tant que root."
-        echo "Il est conçu pour configurer l'environnement d'un utilisateur standard."
-        exit 1
+        die "Ce script ne doit pas être exécuté en tant que root : il configure l'environnement d'un utilisateur standard."
     fi
 }
 
@@ -19,151 +50,139 @@ detect_os() {
     fi
 }
 
-pkg_install() {
-    os=$(detect_os)
-     case "$os" in
-        ubuntu|debian) sudo apt-get install -y "$1" ;;
-        alpine) sudo apk add "$1" ;;
-        *) echo "OS non supporté : $os"
-           exit 1
-           ;;
-     esac
-}
-
-prepare_os() {
-    os=$(detect_os)
-    case "$os" in
-        ubuntu|debian)
-            sudo apt-get update -qq
-            ;;
-        alpine)
-            sudo apk update
-            ;;
-        *)
-            echo "OS non supporté : $os"
-            exit 1
-            ;;
-    esac
-}
-
-add_user_sudo() {
-    if ! groups "$USER" | grep -q "\bsudo\b"; then
-        echo "Adding $USER to sudo group... (Please enter your root password)"
-        su -c "usermod -aG sudo \"$USER\"" < /dev/tty
-        echo "Please log out and log back in for the changes to take effect."
-        echo "You can also log again with 'su - $USER' to apply the new group membership immediately."  
-        echo "You can then re-run this script to continue the installation process after logging back in."
-        exit 0
-    fi
-}
-
-prepare_privilege() {
-    # Checking if user have sudo capabilities
-    echo "Trying to confirm that you have sudo capabilities available. Please enter your sudo password if asked"
-    if sudo -n true > /dev/null 2>&1; then
-        echo "Sudo capabilities are already available"
+# Constate la capacité d'élévation. N'échoue jamais : renseigne $SUDO et rend
+# la main, c'est à l'appelant de composer avec le résultat.
+detect_privilege() {
+    if ! command -v sudo >/dev/null 2>&1; then
+        warn "sudo absent : mode userland strict."
+        SUDO=""
         return 0
     fi
 
-    if command -v sudo >/dev/null 2>&1; then
-        echo "sudo is already installed. but capabilities are lacking"
-        add_user_sudo
-    else
-        pkg_install "sudo"
-        add_user_sudo
+    if sudo -n true >/dev/null 2>&1; then
+        log "Élévation disponible sans mot de passe."
+        SUDO="sudo"
+        return 0
     fi
+
+    log "sudo est présent mais demande une authentification."
+    if sudo -v; then
+        log "Élévation accordée."
+        SUDO="sudo"
+    else
+        warn "Élévation indisponible : poursuite en mode userland strict."
+        SUDO=""
+    fi
+    return 0
 }
 
-# Install python
-install_python_and_pip() {
-    if command -v python3 >/dev/null 2>&1 && command -v pip3 >/dev/null 2>&1; then
-        echo "Python et pip déjà installés."
-        return
+# Installe un paquet système. Retourne 1 si l'élévation manque ou si l'OS est
+# inconnu, pour que l'appelant puisse basculer sur un repli userland.
+pkg_install() {
+    if [ -z "$SUDO" ]; then
+        return 1
     fi
-    os=$(detect_os)
-    case "$os" in
-        ubuntu|debian)
-            sudo apt-get install -y python3 python3-pip
-            ;;
-        *)
-            echo "OS non supporté : $os"
-            exit 1
-            ;;
+    case "$(detect_os)" in
+        ubuntu | debian) $SUDO apt-get install -y "$1" ;;
+        alpine) $SUDO apk add "$1" ;;
+        *) return 1 ;;
     esac
 }
 
-
-# Only calld by install_ansible there is no failsafe if function is called directly
-install_ansible_via_pip() {
-    if ! command -v pip3 >/dev/null 2>&1; then
-        echo "pip is not installed. Installing pip first..."
-        install_python_and_pip
+prepare_os() {
+    if [ -z "$SUDO" ]; then
+        log "Sans élévation : mise à jour du cache de paquets ignorée."
+        return 0
     fi
-    echo "Installing Ansible via pip..."
-    pip3 install --user ansible
+    case "$(detect_os)" in
+        ubuntu | debian) $SUDO apt-get update -qq ;;
+        alpine) $SUDO apk update ;;
+        *) warn "OS non reconnu : mise à jour du cache ignorée." ;;
+    esac
 }
 
-
-install_ansible() {
-    if command -v ansible >/dev/null 2>&1; then
-        echo "Ansible is already installed."
-    else
-        os=$(detect_os)
-        echo "Installing Ansible..."
-            case "$os" in
-                ubuntu|debian)
-                    sudo apt install ansible -y
-                    ;;
-                *)
-                    echo "Unsupported OS: $os"
-                    echo "Attempting to install Ansible via pip..."
-                    install_ansible_via_pip
-                    ;;
-            esac
+# Repli sans privilège. Un venv contourne PEP 668
+# (« externally-managed-environment »), qui interdit `pip install --user` sur
+# Debian 12+ et Ubuntu 24.04 — l'ancien repli de ce script.
+install_ansible_userland() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        die "python3 est absent et ne peut pas être installé sans privilège."
     fi
+    if ! python3 -m venv --help >/dev/null 2>&1; then
+        die "Le module venv est indisponible (paquet python3-venv). Sans privilège, ansible ne peut pas être installé : demande son installation à un administrateur."
+    fi
+
+    mkdir -p "$(dirname "$ANSIBLE_VENV")"
+    [ -d "$ANSIBLE_VENV" ] || python3 -m venv "$ANSIBLE_VENV"
+    "$ANSIBLE_VENV/bin/pip" install --quiet --upgrade pip
+    "$ANSIBLE_VENV/bin/pip" install --quiet ansible
+
+    PATH="$ANSIBLE_VENV/bin:$PATH"
+    export PATH
+    log "ansible installé dans $ANSIBLE_VENV"
 }
 
+ensure_ansible() {
+    if command -v ansible-playbook >/dev/null 2>&1; then
+        log "ansible déjà disponible."
+        return 0
+    fi
 
+    log "ansible absent : tentative d'installation système."
+    if pkg_install ansible && command -v ansible-playbook >/dev/null 2>&1; then
+        return 0
+    fi
 
-install_git() {
+    log "Installation système impossible : repli sur un venv utilisateur."
+    install_ansible_userland
+}
+
+ensure_git() {
     if command -v git >/dev/null 2>&1; then
-        echo "Git is already installed."
-    else
-        os=$(detect_os)
-        case "$os" in
-            ubuntu|debian)
-                sudo apt install git -y
-                ;;
-            *)
-                echo "Unsupported OS: $os"
-                exit 1
-                ;;
-        esac
+        return 0
     fi
+    log "git absent : tentative d'installation système."
+    pkg_install git
 }
 
 clone_dotfiles() {
-    if [ -d "$HOME/dotfiles" ]; then
-        echo "Dotfiles repository already exists."
-    else
-        git clone https://github.com/iguidado/dotfiles.git $HOME/dotfiles
+    if [ -d "$DOTFILES_DIR/.git" ]; then
+        log "Dépôt déjà présent : $DOTFILES_DIR"
+        return 0
     fi
+    if [ -e "$DOTFILES_DIR" ]; then
+        die "$DOTFILES_DIR existe mais n'est pas un dépôt git."
+    fi
+
+    ensure_git || die "git est absent et ne peut pas être installé sans privilège. Fais-le installer, ou copie le dépôt à la main dans $DOTFILES_DIR."
+
+    log "Clonage du dépôt dans $DOTFILES_DIR"
+    git clone "$DOTFILES_REPO" "$DOTFILES_DIR"
 }
 
+# Composition finale : le playbook n'a besoin d'élévation que pour installer
+# stow, et uniquement s'il manque. On ne demande donc `-K` que dans ce cas
+# précis, et seulement si l'élévation réclame effectivement un mot de passe.
 run_playbook() {
-    ansible-playbook -i "localhost," -c local $HOME/dotfiles/ansible/container_base.yml "$@"
-    #ansible-playbook -i "localhost," -c local $HOME/dotfiles/playbook.yml "$@"
-}
+    if ! command -v stow >/dev/null 2>&1 && [ -n "$SUDO" ]; then
+        if ! sudo -n true >/dev/null 2>&1; then
+            log "stow absent : le playbook sera lancé avec élévation."
+            set -- -K "$@"
+        fi
+    fi
 
+    ansible-playbook "$DOTFILES_DIR/ansible/dotfiles.yml" \
+        -i "$DOTFILES_DIR/ansible/inventory.ini" "$@"
+}
 
 main() {
     check_root
-    prepare_privilege
+    detect_privilege
     prepare_os
-    install_ansible
-    install_git
     clone_dotfiles
+    ensure_ansible
     run_playbook "$@"
+    log "Terminé."
 }
 
 main "$@"
