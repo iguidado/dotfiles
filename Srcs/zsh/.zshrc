@@ -129,3 +129,9 @@ alias dc="docker compose"
 if [ -f "$HOME/.local/bin/env" ]; then
     . "$HOME/.local/bin/env"
 fi
+
+
+# Protection against tmux nested summon
+if [ -z "$TMUX" ]; then
+    tmux
+fi
